@@ -97,16 +97,16 @@ Feel free to contribute improvements, bug fixes, or new features!
 
 ## 📄 Dempendencies and Imports
 
-go mod init github.com/1amKhush/Practice-
-go get github.com/pion/webrtc/v4
-go get github.com/pion/ice/v2
-go get github.com/libp2p/go-libp2p
-go get github.com/libp2p/go-libp2p-pubsub
-go get github.com/libp2p/go-libp2p/p2p/discovery/mdns
-go get github.com/libp2p/go-libp2p-kad-dht
-go get github.com/multiformats/go-multiaddr
+-go mod init github.com/1amKhush/Practice-
+-go get github.com/pion/webrtc/v4
+-go get github.com/pion/ice/v2
+-go get github.com/libp2p/go-libp2p
+-go get github.com/libp2p/go-libp2p-pubsub
+-go get github.com/libp2p/go-libp2p/p2p/discovery/mdns
+-go get github.com/libp2p/go-libp2p-kad-dht
+-go get github.com/multiformats/go-multiaddr
 
-go mod tidy
+-go mod tidy
 
 
 ---
