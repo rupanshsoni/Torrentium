@@ -21,7 +21,6 @@ func ShortenPeerID(id string) string {
 const TrackerProtocol = "/tracker/1.0.0"
 
 // yeh protocol 1.PeerID assign karta hai
-//
 //	    	    2.peer name(input) read karta hai
 //	    	    3.Peer ko DB mein store karta hai
 //			    4.is_online state ko track karta hai

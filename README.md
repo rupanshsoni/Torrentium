@@ -62,10 +62,6 @@ Either person can now request files:
 - Internet connection (for initial WebRTC signaling)
 - Files to share in the same directory
 
-## 📦 Dependencies
-
-- `github.com/pion/webrtc/v3` - WebRTC implementation for Go
-
 ## 🌐 How It Works
 
 Torrentium uses WebRTC technology to establish direct peer-to-peer connections:
@@ -95,17 +91,18 @@ go build
 
 Feel free to contribute improvements, bug fixes, or new features!
 
-## 📄 Dempendencies and Imports
+## 📦 Dependencies and Imports
 
--go get github.com/pion/webrtc/v4
--go get github.com/pion/ice/v2
--go get github.com/libp2p/go-libp2p
--go get github.com/libp2p/go-libp2p-pubsub
--go get github.com/libp2p/go-libp2p/p2p/discovery/mdns
--go get github.com/libp2p/go-libp2p-kad-dht
--go get github.com/multiformats/go-multiaddr
+- go mod init github.com/1amKhush/Practice-
+- go get github.com/pion/webrtc/v4
+- go get github.com/pion/ice/v2
+- go get github.com/libp2p/go-libp2p
+- go get github.com/libp2p/go-libp2p-pubsub
+- go get github.com/libp2p/go-libp2p/p2p/discovery/mdns
+- go get github.com/libp2p/go-libp2p-kad-dht
+- go get github.com/multiformats/go-multiaddr
 
--go mod tidy
+- go mod tidy
 
 
 ---
