@@ -30,6 +30,7 @@ const WebRTCSignalingProtocolID = "/webrtc/sdp/1.0.0"
 // Global variables
 var peerConnection *webRTC.WebRTCPeer
 var libp2pHost host.Host
+// var name string
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -268,7 +269,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 			// DECODE Base64 SDP
 			decodedSDP, err := base64.StdEncoding.DecodeString(data)
 			if err != nil {
-				fmt.Printf("❌ Error decoding Base64 SDP offer from %s: %v\n", s.Conn().RemotePeer().String(), err)
+				fmt.Printf("❌ Error decoding Base64 SDP offer from (%s): %v\n", s.Conn().RemotePeer().String(), err)
 				continue
 			}
 			sdpString := string(decodedSDP)
