@@ -114,10 +114,6 @@ func NewWebRTCPeer(onDataChannelMessage func(webrtc.DataChannelMessage, *WebRTCP
 	ordered := true // Explicitly define boolean for pointer
 	dc, err := conn.CreateDataChannel("file-transfer", &webrtc.DataChannelInit{
 		Ordered: &ordered, // Use the address of a boolean variable
-		// `Reliable` field does not exist. Reliability is implied by `Ordered: true`
-		// along with default SCTP settings. If you need to tune reliability/unreliability,
-		// use MaxRetransmits or MaxPacketLifeTime.
-		// For example, for unreliable: MaxRetransmits: webrtc.Uint16(0)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data channel: %w", err)
