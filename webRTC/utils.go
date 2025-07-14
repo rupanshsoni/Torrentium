@@ -5,7 +5,6 @@ import (
 	"strings"
 )
 
-
 // ParseCommand parses commands received from peers.
 // Format: "COMMAND:filename:filesize"
 func ParseCommand(command string) (cmd, filename, filesize string) {
@@ -26,7 +25,6 @@ func ParseCommand(command string) (cmd, filename, filesize string) {
 
 	return
 }
-
 
 // PrintInstructions shows how to use the application.
 func PrintInstructions() {
