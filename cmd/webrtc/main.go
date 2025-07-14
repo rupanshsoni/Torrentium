@@ -100,7 +100,7 @@ func main() {
         fmt.Println("  connect <multiaddr>  - Connect to a peer using their full multiaddress (e.g., /ip4/X.X.X.X/tcp/Y/p2p/Qm... )")
 		fmt.Println("  offer <target_libp2p_peer_id> - Create connection offer to a peer")
 		fmt.Println("  download <file>    - Download file from peer")
-		fmt.Println("  addfile <filename>        - Add a file to your shared list")
+		fmt.Println("  addfile <filename> - Add a file to your shared list")
 		fmt.Println("  listfiles          - List all available files on the network")
 		fmt.Println("  status             - Show connection status")
 		fmt.Println("  help               - Show instructions again")
@@ -230,7 +230,7 @@ func handleDownloadCommand(filename string) {
 	fmt.Println("💡 The file will be saved with 'downloaded_' prefix when received.")
 }
 
-// handleLibp2pSignalingStream processes incoming WebRTC signaling messages (offers/answers) over a libp2p stream.
+//  processes incoming WebRTC signaling messages (offers/answers) over a libp2p stream.
 func handleLibp2pSignalingStream(s network.Stream) {
 	defer func() {
 		fmt.Printf("Closing signaling stream from %s\n", s.Conn().RemotePeer().String())
@@ -272,7 +272,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 				continue
 			}
 			sdpString := string(decodedSDP)
-			fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
+			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
 
 			answer, err := peerConnection.CreateAnswer(sdpString) // Use decoded SDP
 			if err != nil {
@@ -293,7 +293,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 			}
 			err = rw.Flush()
 			if err != nil {
-				fmt.Printf("❌ Error flushing answer to %s: %v\n", err)
+				fmt.Printf("❌ Error flushing answer to %s: %v\n", s.Conn().RemotePeer().String(), err)
 				return
 			}
 			fmt.Printf("✅ Answer sent to peer %s. Waiting for WebRTC connection...\n", s.Conn().RemotePeer().String())
@@ -316,7 +316,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 				continue
 			}
 			sdpString := string(decodedSDP)
-			fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
+			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
 
 			err = peerConnection.SetAnswer(sdpString) // Use decoded SDP
 			if err != nil {
@@ -392,7 +392,7 @@ func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
 		return
 	}
 	sdpString := string(decodedSDP)
-	fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
+	// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
 
 
 	fmt.Printf("Received WebRTC answer from %s. Completing connection...\n", targetPeerID.String())
