@@ -101,6 +101,9 @@ Feel free to contribute improvements, bug fixes, or new features!
 - go get github.com/libp2p/go-libp2p/p2p/discovery/mdns
 - go get github.com/libp2p/go-libp2p-kad-dht
 - go get github.com/multiformats/go-multiaddr
+- go get github.com/joho/godotenv
+- go get github.com/lib/pq
+
 
 - go mod tidy
 

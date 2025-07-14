@@ -1,55 +1,52 @@
-package webrtc
+package webRTC
 
 import (
 	"fmt"
 	"strings"
-	"strconv"
 )
 
-// parseCommand parses commands received from peers
-// Commands format: "COMMAND:param1:param2"
-func parseCommand(command string) (cmd, filename string, filesize int64) {
+
+// ParseCommand parses commands received from peers.
+// Format: "COMMAND:filename:filesize"
+func ParseCommand(command string) (cmd, filename, filesize string) {
 	parts := strings.Split(command, ":")
-	
 	if len(parts) < 1 {
-		return "", "", 0
+		return "", "", ""
 	}
-	
+
 	cmd = parts[0]
-	
+
 	if len(parts) >= 2 {
 		filename = parts[1]
 	}
-	
 	if len(parts) >= 3 {
-		if size, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
-			filesize = size
-		}
+		// Just pass it through as string — let caller parse
+		filesize = parts[2]
 	}
-	
-	return cmd, filename, filesize
+
+	return
 }
 
-// printInstructions shows how to use the application
+
+// PrintInstructions shows how to use the application.
 func PrintInstructions() {
-	fmt.Println("📖 How to use Torrentium:")
-	fmt.Println()
-	fmt.Println("🔸 STEP 1: Person A types 'offer' to create a connection offer")
-	fmt.Println("🔸 STEP 2: Person A shares the offer JSON with Person B")
-	fmt.Println("🔸 STEP 3: Person B types 'answer <offer_json>' to create an answer")
-	fmt.Println("🔸 STEP 4: Person B shares the answer JSON with Person A")
-	fmt.Println("🔸 STEP 5: Person A types 'complete <answer_json>' to finish connection")
-	fmt.Println("🔸 STEP 6: Both can now transfer files using 'download <filename>'")
-	fmt.Println()
-	fmt.Println("💡 Tips:")
-	fmt.Println("   • This works through firewalls and NAT without port forwarding!")
-	fmt.Println("   • Files will be saved with 'downloaded_' prefix")
-	fmt.Println("   • Connection is direct and encrypted")
-	fmt.Println()
+	fmt.Println(`📖 How to use Torrentium:
+
+🔸 STEP 1: Person A types 'offer' to create a connection offer
+🔸 STEP 2: Person A shares the offer JSON with Person B
+🔸 STEP 3: Person B types 'answer <offer_json>' to create an answer
+🔸 STEP 4: Person B shares the answer JSON with Person A
+🔸 STEP 5: Person A types 'complete <answer_json>' to finish connection
+🔸 STEP 6: Both can now transfer files using 'download <filename>'
+
+💡 Tips:
+   • This works through firewalls and NAT without port forwarding!
+   • Files will be saved with 'downloaded_' prefix
+   • Connection is direct and encrypted`)
 }
 
-// formatFileSize formats bytes into human readable format
-func formatFileSize(bytes int64) string {
+// FormatFileSize converts bytes to human-readable format.
+func FormatFileSize(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
 		return fmt.Sprintf("%d B", bytes)
@@ -60,4 +57,20 @@ func formatFileSize(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// Close closes the WebRTC peer connection and any open file writer.
+func (p *WebRTCPeer) Close() error {
+	fmt.Println("Closing WebRTC peer connection...")
+	if p.fileWriter != nil {
+		p.fileWriter.Close()
+		p.fileWriter = nil
+	}
+	if p.dataChannel != nil {
+		p.dataChannel.Close()
+	}
+	if p.connection != nil {
+		return p.connection.Close()
+	}
+	return nil
 }

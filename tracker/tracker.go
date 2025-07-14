@@ -2,7 +2,7 @@ package tracker
 
 import (
 	"time"
-	"github.com/1amKhush/Torrentium/db"
+	"torrentium/db"
 )
 
 
