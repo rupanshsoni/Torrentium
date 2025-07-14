@@ -31,7 +31,7 @@ func parseCommand(command string) (cmd, filename string, filesize int64) {
 }
 
 // printInstructions shows how to use the application
-func printInstructions() {
+func PrintInstructions() {
 	fmt.Println("📖 How to use Torrentium:")
 	fmt.Println()
 	fmt.Println("🔸 STEP 1: Person A types 'offer' to create a connection offer")

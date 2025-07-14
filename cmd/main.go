@@ -15,7 +15,7 @@ func main() {
 	fmt.Println()
 
 	// Show instructions
-	printInstructions()
+	PrintInstructions()
 
 	// Create WebRTC peer
 	peer, err := NewWebRTCPeer()
@@ -59,7 +59,7 @@ func main() {
 			return
 
 		case "help", "instructions":
-			printInstructions()
+			PrintInstructions()
 
 		case "status":
 			if peer.IsConnected() {

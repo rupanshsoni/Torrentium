@@ -97,7 +97,6 @@ Feel free to contribute improvements, bug fixes, or new features!
 
 ## 📄 Dempendencies and Imports
 
--go mod init github.com/1amKhush/Practice-
 -go get github.com/pion/webrtc/v4
 -go get github.com/pion/ice/v2
 -go get github.com/libp2p/go-libp2p
