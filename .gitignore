@@ -42,4 +42,4 @@ Thumbs.db
 .env
 # .env.*
 
-.vscode/settings.json
+.vscode/

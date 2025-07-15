@@ -12,7 +12,7 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-// WebRTCPeer represents a WebRTC peer connection.
+// represents a WebRTC peer connection.
 type WebRTCPeer struct {
 	connection      *webrtc.PeerConnection
 	dataChannel     *webrtc.DataChannel // The primary data channel for file transfer
@@ -22,9 +22,9 @@ type WebRTCPeer struct {
 	connectionReady chan struct{}       // Channel to signal when connection is established
 }
 
-// NewWebRTCPeer creates a new WebRTCPeer instance.
+// creates a new WebRTCPeer instance.
 func NewWebRTCPeer(onDataChannelMessage func(webrtc.DataChannelMessage, *WebRTCPeer)) (*WebRTCPeer, error) {
-	// WebRTC configuration (STUN server for NAT traversal)
+	// STUN server for NAT traversal
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
@@ -51,6 +51,7 @@ func NewWebRTCPeer(onDataChannelMessage func(webrtc.DataChannelMessage, *WebRTCP
 			if !peer.connected {
 				peer.connected = true
 				// Close the channel to signal that connection is ready
+
 				// Only close if it hasn't been closed already
 				select {
 				case <-peer.connectionReady:
@@ -108,12 +109,12 @@ func NewWebRTCPeer(onDataChannelMessage func(webrtc.DataChannelMessage, *WebRTCP
 		})
 	})
 
-	// Create a reliable data channel for the offerer.
-	// This channel will be created by the peer initiating the connection.
+	// Create a reliable data channel for the offerer. This channel will be created by the peer initiating the connection.
+	
 	// The `OnDataChannel` callback above handles the remote side when they open one.
-	ordered := true // Explicitly define boolean for pointer
+	ordered := true 
 	dc, err := conn.CreateDataChannel("file-transfer", &webrtc.DataChannelInit{
-		Ordered: &ordered, // Use the address of a boolean variable
+		Ordered: &ordered, 
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data channel: %w", err)
@@ -169,6 +170,7 @@ func (p *WebRTCPeer) CreateOffer() (string, error) {
 	}
 
 	// Wait for ICE gathering to complete before returning the SDP
+
 	// Correct way to wait for a channel to close:
 	<-offerGatheringComplete
 
@@ -205,6 +207,7 @@ func (p *WebRTCPeer) CreateAnswer(offerSDP string) (string, error) {
 	}
 
 	// Wait for ICE gathering to complete before returning the SDP
+
 	// Correct way to wait for a channel to close:
 	<-answerGatheringComplete
 
@@ -229,14 +232,14 @@ func (p *WebRTCPeer) SetAnswer(answerSDP string) error {
 	return nil
 }
 
-// IsConnected checks if the WebRTC peer is connected.
+//checks if the WebRTC peer is connected.
 func (p *WebRTCPeer) IsConnected() bool {
 	p.connectedMu.RLock()
 	defer p.connectedMu.RUnlock()
 	return p.connected
 }
 
-// WaitForConnection blocks until the WebRTC connection is established or a timeout occurs.
+//blocks until the WebRTC connection is established or a timeout occurs.
 func (p *WebRTCPeer) WaitForConnection(timeout time.Duration) error {
 	select {
 	case <-p.connectionReady:
@@ -246,7 +249,7 @@ func (p *WebRTCPeer) WaitForConnection(timeout time.Duration) error {
 	}
 }
 
-// RequestFile sends a command to the connected peer to request a file.
+//sends a command to the connected peer to request a file.
 func (p *WebRTCPeer) RequestFile(filename string) error {
 	if !p.IsConnected() {
 		return fmt.Errorf("not connected to a peer")
@@ -256,7 +259,7 @@ func (p *WebRTCPeer) RequestFile(filename string) error {
 	return p.SendTextData(fmt.Sprintf("REQUEST_FILE:%s", encodedFilename))
 }
 
-// SendTextData sends a string message over the data channel.
+//sends a string message over the data channel.
 func (p *WebRTCPeer) SendTextData(data string) error {
 	if p.dataChannel == nil || p.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel not ready or closed")
@@ -264,7 +267,7 @@ func (p *WebRTCPeer) SendTextData(data string) error {
 	return p.dataChannel.SendText(data)
 }
 
-// SendBinaryData sends a byte slice (binary data) over the data channel.
+//sends a byte slice (binary data) over the data channel.
 func (p *WebRTCPeer) SendBinaryData(data []byte) error {
 	if p.dataChannel == nil || p.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel not ready or closed")
@@ -272,12 +275,12 @@ func (p *WebRTCPeer) SendBinaryData(data []byte) error {
 	return p.dataChannel.Send(data)
 }
 
-// SetFileWriter sets the file writer for incoming file data.
+// sets the file writer for incoming file data.
 func (p *WebRTCPeer) SetFileWriter(w *os.File) {
 	p.fileWriter = w
 }
 
-// GetFileWriter returns the current file writer.
+// returns the current file writer.
 func (p *WebRTCPeer) GetFileWriter() *os.File {
 	return p.fileWriter
 }

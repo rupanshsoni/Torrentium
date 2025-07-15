@@ -19,7 +19,6 @@ func ParseCommand(command string) (cmd, filename, filesize string) {
 		filename = parts[1]
 	}
 	if len(parts) >= 3 {
-		// Just pass it through as string — let caller parse
 		filesize = parts[2]
 	}
 
@@ -57,7 +56,7 @@ func FormatFileSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// Close closes the WebRTC peer connection and any open file writer.
+//closes the WebRTC peer connection and any open file writer.
 func (p *WebRTCPeer) Close() error {
 	fmt.Println("Closing WebRTC peer connection...")
 	if p.fileWriter != nil {

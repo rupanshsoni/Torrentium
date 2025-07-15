@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"encoding/base64" // Import base64 package
+	"encoding/base64" 
 	"fmt"
 	"io"
 	"os"
@@ -261,12 +261,12 @@ func handleLibp2pSignalingStream(s network.Stream) {
 			continue
 		}
 		msgType := parts[0]
-		data := parts[1] // This is the SDP string (now Base64 encoded)
+		data := parts[1] // This is the SDP string (Base64 encoded)
 
 		switch msgType {
 		case "OFFER":
 			fmt.Printf("Received WebRTC offer from %s. Creating answer...\n", s.Conn().RemotePeer().String())
-			// DECODE Base64 SDP
+			
 			decodedSDP, err := base64.StdEncoding.DecodeString(data)
 			if err != nil {
 				fmt.Printf("❌ Error decoding Base64 SDP offer from (%s): %v\n", s.Conn().RemotePeer().String(), err)
@@ -275,7 +275,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 			sdpString := string(decodedSDP)
 			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
 
-			answer, err := peerConnection.CreateAnswer(sdpString) // Use decoded SDP
+			answer, err := peerConnection.CreateAnswer(sdpString) 
 			if err != nil {
 				fmt.Printf("❌ Error creating answer for offer from %s: %v\n", s.Conn().RemotePeer().String(), err)
 				_, writeErr := rw.WriteString(fmt.Sprintf("ERROR:%v\n", err))
@@ -285,7 +285,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 				rw.Flush()
 				return
 			}
-			// ENCODE Base64 SDP for answer
+			
 			encodedAnswer := base64.StdEncoding.EncodeToString([]byte(answer))
 			_, err = rw.WriteString(fmt.Sprintf("ANSWER:%s\n", encodedAnswer)) // Send encoded answer
 			if err != nil {
@@ -319,7 +319,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 			sdpString := string(decodedSDP)
 			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
 
-			err = peerConnection.SetAnswer(sdpString) // Use decoded SDP
+			err = peerConnection.SetAnswer(sdpString)
 			if err != nil {
 				fmt.Printf("❌ Error applying answer from %s: %v\n", s.Conn().RemotePeer().String(), err)
 				return
@@ -345,7 +345,7 @@ func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
 	}
 	fmt.Printf("DEBUG: Generated Offer SDP (length %d):\n%s\n", len(offer), offer)
 
-	// ENCODE Base64 SDP before sending
+	
 	encodedOffer := base64.StdEncoding.EncodeToString([]byte(offer))
 
 	s, err := h.NewStream(ctx, targetPeerID, WebRTCSignalingProtocolID)
@@ -384,9 +384,9 @@ func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
 		fmt.Printf("Malformed answer received from %s: %s\n", targetPeerID.String(), answerStr)
 		return
 	}
-	data := answerParts[1] // This is the SDP string (now Base64 encoded)
+	data := answerParts[1] 
 
-	// DECODE Base64 SDP for answer
+	
 	decodedSDP, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		fmt.Printf("❌ Error decoding Base64 SDP answer from %s: %v\n", targetPeerID.String(), err)
