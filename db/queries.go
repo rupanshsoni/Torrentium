@@ -24,6 +24,7 @@ func InsertPeer(db *pgxpool.Pool, peerID, name, IP string) (uuid.UUID, error) {
 	return id, err
 }
 
+
 func MarkPeerOffline(db *pgxpool.Pool, peerID string, lastSeen time.Time) error {
 	ctx := context.Background()
 	query := `
@@ -35,6 +36,69 @@ func MarkPeerOffline(db *pgxpool.Pool, peerID string, lastSeen time.Time) error 
 	_, err := db.Exec(ctx, query, peerID, lastSeen)
 	return err
 }
+
+
+func RegisterPeerAddresses(db *pgxpool.Pool, peerID string, name string, multiaddrs []string) error {
+	ctx := context.Background()
+
+	query := `
+		INSERT INTO peers(peer_id, name, multiaddrs, is_online, last_seen)
+		VALUES ($1, $2, $3, TRUE, NOW())
+
+		ON CONFLICT (peer_id) DO UPDATE SET
+			multiaddrs = $3,
+			is_online = TRUE,
+			last_seen = NOW();
+	`
+
+	_, err := db.Exec(ctx, query, peerID, name, multiaddrs)
+	if err != nil {
+		return fmt.Errorf("failed to register peer Address : %w", err)
+	}
+
+	return nil
+}
+
+
+func LookupPeerAddress(db *pgxpool.Pool, peerID string) ([]string, error) {
+	ctx := context.Background()
+	var multiaddrs []string
+	
+	query := `
+		SELECT multiaddrs
+		FROM peers
+		WHERE peer_id = $1 and is_online = TRUE
+	`
+
+	err := db.QueryRow(ctx, query, peerID).Scan(&multiaddrs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup peer address for %s: %w", peerID, err)
+	}
+
+	return multiaddrs, nil
+}
+
+
+func CleanOldPeerAddresses(db *pgxpool.Pool, olderThan time.Duration) (error) {
+	ctx := context.Background()
+	threshold := time.Now().Add(-olderThan)
+
+	query := `
+		UPDATE peers
+		SET is_online = FALSE,
+			last_seen = $1
+		WHERE is_online = TRUE;
+	`
+
+	result,  err := db.Exec(ctx, query, threshold)
+	if err != nil {
+		return fmt.Errorf("failed to clean old peer addresses : %w", err)
+	}
+
+	log.Printf("Cleaned %d old peer entries.", result.RowsAffected())
+	return nil
+}
+
 
 func AddFile(db *pgxpool.Pool, fileHash, filename string, fileSize int64, peerID string) error {
 	ctx := context.Background()
@@ -57,12 +121,13 @@ func AddFile(db *pgxpool.Pool, fileHash, filename string, fileSize int64, peerID
 		return err
 	}
 
-	err = AddPeerFile(db, fmt.Sprintf("%d", peerID), fileUUID)
+	err = AddPeerFile(db, fmt.Sprintf("%v", peerID), fileUUID)
 	if err != nil {
 		log.Printf("Failed to link peer to file: %v", err)
 	}
 	return nil
 }
+
 
 func AddPeerFile(db *pgxpool.Pool, peerID, fileUUID string) error {
 	ctx := context.Background()
@@ -79,6 +144,7 @@ func AddPeerFile(db *pgxpool.Pool, peerID, fileUUID string) error {
 	fmt.Printf("Updated peer_id to %s for file %s\n", peerID, fileUUID)
 	return nil
 }
+
 
 func ListAvailableFiles(db *pgxpool.Pool) {
 	ctx := context.Background()
@@ -103,17 +169,19 @@ func ListAvailableFiles(db *pgxpool.Pool) {
 	}
 }
 
-func GetPeerUUIDByID(db *pgxpool.Pool, peerID int) (string, error) {
+
+func GetPeerUUIDByID(db *pgxpool.Pool, peerID string) (string, error) {
 	ctx := context.Background()
 	var uuid string
-	idStr := fmt.Sprintf("%d", peerID)
-	err := db.QueryRow(ctx, `SELECT id FROM peers WHERE peer_id = $1`, idStr).Scan(&uuid)
+	// idStr := fmt.Sprintf(peerID)
+	err := db.QueryRow(ctx, `SELECT id FROM peers WHERE peer_id = $1`, peerID).Scan(&uuid)
 	if err != nil {
-		log.Printf("Failed to fetch UUID for peer_id %d: %v\n", peerID, err)
+		log.Printf("Failed to fetch UUID for peer_id %s: %v\n", peerID, err)
 		return "", err
 	}
 	return uuid, nil
 }
+
 
 func GetFileUUIDByHash(db *pgxpool.Pool, fileHash string) (string, error) {
 	ctx := context.Background()
@@ -124,4 +192,40 @@ func GetFileUUIDByHash(db *pgxpool.Pool, fileHash string) (string, error) {
 		return "", err
 	}
 	return fileUUID, nil
+}
+
+
+type PeerInfo struct {
+	PeerID string
+	Name   string
+	Online bool
+}
+
+func ListPeers(db *pgxpool.Pool) ([]PeerInfo, error) {
+	ctx := context.Background()
+	var peers []PeerInfo
+	query := `
+        SELECT peer_id, name, is_online
+        FROM peers
+        ORDER BY last_seen DESC;
+    `
+	rows, err := db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query peers: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var p PeerInfo
+		if err := rows.Scan(&p.PeerID, &p.Name, &p.Online); err != nil {
+			return nil, fmt.Errorf("failed to scan peer row: %w", err)
+		}
+		peers = append(peers, p)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error after scanning peer rows: %w", err)
+	}
+
+	return peers, nil
 }
