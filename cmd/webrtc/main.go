@@ -4,15 +4,16 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"encoding/base64" 
+	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	"math"
-	
+
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -21,6 +22,7 @@ import (
 	"github.com/pion/webrtc/v3"
 
 	"torrentium/db"
+	"torrentium/torrentfile"
 	"torrentium/webRTC"
 )
 
@@ -30,6 +32,7 @@ const WebRTCSignalingProtocolID = "/webrtc/sdp/1.0.0"
 // Global variables
 var peerConnection *webRTC.WebRTCPeer
 var libp2pHost host.Host
+
 // var name string
 
 func main() {
@@ -44,22 +47,22 @@ func main() {
 
 	fmt.Print("Enter your name: ")
 	reader := bufio.NewReader(os.Stdin)
-	name, err := reader.ReadString('\n')
+	_, err := reader.ReadString('\n')
 	if err != nil {
 		fmt.Printf("Error reading name: %v\n", err)
 		return
 	}
-	name = strings.TrimSpace(name)
+	// name = strings.TrimSpace(name)
 
 	webRTC.PrintInstructions()
 
 	libp2pHost, err = libp2p.New(
 		libp2p.ListenAddrs(
-            multiaddr.StringCast("/ip4/0.0.0.0/tcp/0"),
-            multiaddr.StringCast("/ip4/0.0.0.0/udp/0/quic-v1"),
-            multiaddr.StringCast("/ip6/::/tcp/0"),
-            multiaddr.StringCast("/ip6/::/udp/0/quic-v1"),
-        ),
+			multiaddr.StringCast("/ip4/0.0.0.0/tcp/0"),
+			multiaddr.StringCast("/ip4/0.0.0.0/udp/0/quic-v1"),
+			multiaddr.StringCast("/ip6/::/tcp/0"),
+			multiaddr.StringCast("/ip6/::/udp/0/quic-v1"),
+		),
 		libp2p.Identity(nil),
 	)
 	if err != nil {
@@ -98,7 +101,7 @@ func main() {
 
 	for {
 		fmt.Println("\n📋 Available Commands:")
-        fmt.Println("  connect <multiaddr>  - Connect to a peer using their full multiaddress (e.g., /ip4/X.X.X.X/tcp/Y/p2p/Qm... )")
+		fmt.Println("  connect <multiaddr>  - Connect to a peer using their full multiaddress (e.g., /ip4/X.X.X.X/tcp/Y/p2p/Qm... )")
 		fmt.Println("  offer <target_libp2p_peer_id> - Create connection offer to a peer")
 		fmt.Println("  download <file>    - Download file from peer")
 		fmt.Println("  addfile <filename> - Add a file to your shared list")
@@ -142,28 +145,30 @@ func main() {
 			}
 			filename := parts[1]
 			addFileCommand(filename)
-
-        case "connect":
-            if len(parts) < 2 {
-                fmt.Println("❌ Usage: connect <full_multiaddress>")
-                fmt.Println("💡 Example: connect /ip4/192.168.1.100/tcp/4001/p2p/Qm...ABCD")
-                continue
-            }
-            maddrStr := parts[1]
-            maddr, err := multiaddr.NewMultiaddr(maddrStr)
-            if err != nil {
-                fmt.Printf("❌ Invalid multiaddress: %v\n", err)
-                continue
-            }
-            pi, err := peer.AddrInfoFromP2pAddr(maddr)
-            if err != nil {
-                fmt.Printf("❌ Could not parse peer info from multiaddress: %v\n", err)
-                continue
-            }
-            libp2pHost.Peerstore().AddAddrs(pi.ID, pi.Addrs, time.Duration(math.MaxInt64))
-            fmt.Printf("✅ Added peer %s with address %s to peerstore.\n", pi.ID.String(), maddrStr)
-            fmt.Println("💡 You can now try 'offer' command with this peer's ID.")
-
+			err := torrentfile.CreateTorrentfile(filename)
+			if err != nil {
+				log.Fatalf("error in making torrent file: %v", err)
+			}
+		case "connect":
+			if len(parts) < 2 {
+				fmt.Println("❌ Usage: connect <full_multiaddress>")
+				fmt.Println("💡 Example: connect /ip4/192.168.1.100/tcp/4001/p2p/Qm...ABCD")
+				continue
+			}
+			maddrStr := parts[1]
+			maddr, err := multiaddr.NewMultiaddr(maddrStr)
+			if err != nil {
+				fmt.Printf("❌ Invalid multiaddress: %v\n", err)
+				continue
+			}
+			pi, err := peer.AddrInfoFromP2pAddr(maddr)
+			if err != nil {
+				fmt.Printf("❌ Could not parse peer info from multiaddress: %v\n", err)
+				continue
+			}
+			libp2pHost.Peerstore().AddAddrs(pi.ID, pi.Addrs, time.Duration(math.MaxInt64))
+			fmt.Printf("✅ Added peer %s with address %s to peerstore.\n", pi.ID.String(), maddrStr)
+			fmt.Println("💡 You can now try 'offer' command with this peer's ID.")
 
 		case "offer":
 			if len(parts) < 2 {
@@ -231,7 +236,7 @@ func handleDownloadCommand(filename string) {
 	fmt.Println("💡 The file will be saved with 'downloaded_' prefix when received.")
 }
 
-//  processes incoming WebRTC signaling messages (offers/answers) over a libp2p stream.
+// processes incoming WebRTC signaling messages (offers/answers) over a libp2p stream.
 func handleLibp2pSignalingStream(s network.Stream) {
 	defer func() {
 		fmt.Printf("Closing signaling stream from %s\n", s.Conn().RemotePeer().String())
@@ -266,7 +271,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 		switch msgType {
 		case "OFFER":
 			fmt.Printf("Received WebRTC offer from %s. Creating answer...\n", s.Conn().RemotePeer().String())
-			
+
 			decodedSDP, err := base64.StdEncoding.DecodeString(data)
 			if err != nil {
 				fmt.Printf("❌ Error decoding Base64 SDP offer from (%s): %v\n", s.Conn().RemotePeer().String(), err)
@@ -275,7 +280,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 			sdpString := string(decodedSDP)
 			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
 
-			answer, err := peerConnection.CreateAnswer(sdpString) 
+			answer, err := peerConnection.CreateAnswer(sdpString)
 			if err != nil {
 				fmt.Printf("❌ Error creating answer for offer from %s: %v\n", s.Conn().RemotePeer().String(), err)
 				_, writeErr := rw.WriteString(fmt.Sprintf("ERROR:%v\n", err))
@@ -285,7 +290,7 @@ func handleLibp2pSignalingStream(s network.Stream) {
 				rw.Flush()
 				return
 			}
-			
+
 			encodedAnswer := base64.StdEncoding.EncodeToString([]byte(answer))
 			_, err = rw.WriteString(fmt.Sprintf("ANSWER:%s\n", encodedAnswer)) // Send encoded answer
 			if err != nil {
@@ -345,7 +350,6 @@ func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
 	}
 	fmt.Printf("DEBUG: Generated Offer SDP (length %d):\n%s\n", len(offer), offer)
 
-	
 	encodedOffer := base64.StdEncoding.EncodeToString([]byte(offer))
 
 	s, err := h.NewStream(ctx, targetPeerID, WebRTCSignalingProtocolID)
@@ -384,9 +388,8 @@ func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
 		fmt.Printf("Malformed answer received from %s: %s\n", targetPeerID.String(), answerStr)
 		return
 	}
-	data := answerParts[1] 
+	data := answerParts[1]
 
-	
 	decodedSDP, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		fmt.Printf("❌ Error decoding Base64 SDP answer from %s: %v\n", targetPeerID.String(), err)
@@ -394,7 +397,6 @@ func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
 	}
 	sdpString := string(decodedSDP)
 	// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
-
 
 	fmt.Printf("Received WebRTC answer from %s. Completing connection...\n", targetPeerID.String())
 	err = peerConnection.SetAnswer(sdpString) // Use decoded SDP
