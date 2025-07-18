@@ -444,6 +444,7 @@ func (r *Repository) GetSignalingSessionByProvider(providerID uuid.UUID, fileID 
 // Legacy functions for backward compatibility with existing code
 func MarkPeerOffline(db *pgxpool.Pool, peerID string) error {
 	ctx := context.Background()
+<<<<<<< Updated upstream
 	query := `
 		UPDATE peers
 		SET is_online = false,
@@ -453,6 +454,17 @@ func MarkPeerOffline(db *pgxpool.Pool, peerID string) error {
 	lastSeen := time.Now()
 	_, err := db.Exec(ctx, query, peerID, lastSeen)
 	return err
+=======
+	
+    query := `
+        UPDATE peers
+        SET is_online = false,
+            last_seen = $2
+        WHERE peer_id = $1;
+    `
+    _, err := db.Exec(ctx, query, peerID, lastSeen) // Use the passed context
+    return err
+>>>>>>> Stashed changes
 }
 
 func AddFile(db *pgxpool.Pool, fileHash, filename string, fileSize int64, peerID string) error {
