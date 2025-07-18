@@ -9,10 +9,12 @@ import (
 	"io"
 	"log"
 	"math"
+  "net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -45,14 +47,46 @@ func main() {
 	fmt.Println("Direct peer-to-peer file sharing that works through firewalls!")
 	fmt.Println()
 
-	fmt.Print("Enter your name: ")
+	fmt.Print("Enter your peer ID: ")
 	reader := bufio.NewReader(os.Stdin)
-	_, err := reader.ReadString('\n')
+	peerID, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Printf("Error reading name: %v\n", err)
+		fmt.Printf("Error reading peer ID: %v\n", err)
 		return
 	}
-	// name = strings.TrimSpace(name)
+	peerID = strings.TrimSpace(peerID)
+
+	// Use the peerID to upsert the peer in the database
+	// Initialize the database
+	db.InitDB()
+
+	// Convert the pgxpool.Pool instance to a *sql.DB instance
+	repo := db.NewRepository(stdlib.OpenDB(*db.DB.Config().ConnConfig))
+
+	// Get the IP address of the peer
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		fmt.Printf("Error getting IP address: %v\n", err)
+		return
+	}
+	var ipAddress string
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				ipAddress = ipnet.IP.String()
+				break
+			}
+		}
+	}
+
+	peerID = strings.TrimSpace(peerID)
+
+	_, err = repo.UpsertPeer(peerID, "", ipAddress)
+
+	if err != nil {
+		fmt.Printf("Error upserting peer: %v\n", err)
+		return
+	}
 
 	webRTC.PrintInstructions()
 
@@ -125,6 +159,13 @@ func main() {
 
 		switch cmd {
 		case "exit", "quit", "q":
+			// Set peer offline before exiting
+			err = repo.SetPeerOffline(peerID)
+			if err != nil {
+				fmt.Printf("⚠️  Warning: Failed to set peer offline in database: %v\n", err)
+			} else {
+				fmt.Printf("✅ Peer %s set to offline\n", peerID)
+			}
 			fmt.Println("👋 Goodbye!")
 			return
 
