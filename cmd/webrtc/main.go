@@ -7,14 +7,15 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"math"
-	"net"
+  "net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
 	"github.com/jackc/pgx/v5/stdlib"
+
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -23,6 +24,7 @@ import (
 	"github.com/pion/webrtc/v3"
 
 	"torrentium/db"
+	"torrentium/torrentfile"
 	"torrentium/webRTC"
 )
 
@@ -80,6 +82,7 @@ func main() {
 	peerID = strings.TrimSpace(peerID)
 
 	_, err = repo.UpsertPeer(peerID, "", ipAddress)
+
 	if err != nil {
 		fmt.Printf("Error upserting peer: %v\n", err)
 		return
@@ -183,7 +186,10 @@ func main() {
 			}
 			filename := parts[1]
 			addFileCommand(filename)
-
+			err := torrentfile.CreateTorrentfile(filename)
+			if err != nil {
+				log.Fatalf("error in making torrent file: %v", err)
+			}
 		case "connect":
 			if len(parts) < 2 {
 				fmt.Println("❌ Usage: connect <full_multiaddress>")
