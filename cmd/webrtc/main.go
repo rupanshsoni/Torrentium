@@ -1,574 +1,461 @@
+// cmd/webrtc/main.go
 package main
 
 import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math"
-  "net"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
-	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/multiformats/go-multiaddr"
 	"github.com/pion/webrtc/v3"
 
 	"torrentium/db"
+	"torrentium/p2p"
 	"torrentium/torrentfile"
-	"torrentium/webRTC"
+	torrentiumWebRTC "torrentium/webRTC"
 )
 
-// Define the libp2p protocol ID for WebRTC signaling
-const WebRTCSignalingProtocolID = "/webrtc/sdp/1.0.0"
-
-// Global variables
-var peerConnection *webRTC.WebRTCPeer
-var libp2pHost host.Host
-
-// var name string
+type Client struct {
+	host          host.Host
+	trackerStream network.Stream
+	encoder       *json.Encoder
+	decoder       *json.Decoder
+	peerName      string
+	webRTCPeers   map[peer.ID]*torrentiumWebRTC.WebRTCPeer
+	peersMux      sync.RWMutex
+}
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Unable to access .env file:", err)
+	}
 
-	db.InitDB()
-	fmt.Println("🔥 Torrentium - P2P File Sharing")
-	fmt.Println("==================================")
-	fmt.Println("Direct peer-to-peer file sharing that works through firewalls!")
-	fmt.Println()
-
-	fmt.Print("Enter your peer ID: ")
-	reader := bufio.NewReader(os.Stdin)
-	peerID, err := reader.ReadString('\n')
+	h, err := libp2p.New()
 	if err != nil {
-		fmt.Printf("Error reading peer ID: %v\n", err)
-		return
+		log.Fatal("Failed to create libp2p host:", err)
 	}
-	peerID = strings.TrimSpace(peerID)
+	log.Printf("✅ Peer libp2p Host ID: %s", h.ID())
 
-	// Use the peerID to upsert the peer in the database
-	// Initialize the database
-	db.InitDB()
+	setupGracefulShutdown(h)
 
-	// Convert the pgxpool.Pool instance to a *sql.DB instance
-	repo := db.NewRepository(stdlib.OpenDB(*db.DB.Config().ConnConfig))
+	trackerMultiAddrStr := os.Getenv("TRACKER_ADDR")
+	if trackerMultiAddrStr == "" {
+		log.Fatal("TRACKER_ADDR environment variable is not set or .env file not found.")
+	}
 
-	// Get the IP address of the peer
-	addrs, err := net.InterfaceAddrs()
+	trackerAddrInfo, err := peer.AddrInfoFromString(trackerMultiAddrStr)
 	if err != nil {
-		fmt.Printf("Error getting IP address: %v\n", err)
-		return
-	}
-	var ipAddress string
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				ipAddress = ipnet.IP.String()
-				break
-			}
-		}
+		log.Fatal("Invalid TRACKER_ADDR in .env file:", err)
 	}
 
-	peerID = strings.TrimSpace(peerID)
+	client := NewClient(h)
+	p2p.RegisterSignalingProtocol(h, client.handleWebRTCOffer)
 
-	_, err = repo.UpsertPeer(peerID, "", ipAddress)
-
-	if err != nil {
-		fmt.Printf("Error upserting peer: %v\n", err)
-		return
+	if err := client.connectToTracker(*trackerAddrInfo); err != nil {
+		log.Fatalf("Failed to connect to tracker: %v", err)
 	}
+	defer client.trackerStream.Close()
 
-	webRTC.PrintInstructions()
+	client.commandLoop()
+}
 
-	libp2pHost, err = libp2p.New(
-		libp2p.ListenAddrs(
-			multiaddr.StringCast("/ip4/0.0.0.0/tcp/0"),
-			multiaddr.StringCast("/ip4/0.0.0.0/udp/0/quic-v1"),
-			multiaddr.StringCast("/ip6/::/tcp/0"),
-			multiaddr.StringCast("/ip6/::/udp/0/quic-v1"),
-		),
-		libp2p.Identity(nil),
-	)
-	if err != nil {
-		fmt.Printf("❌ Error creating libp2p host: %v\n", err)
-		return
+func NewClient(h host.Host) *Client {
+	return &Client{
+		host:        h,
+		webRTCPeers: make(map[peer.ID]*torrentiumWebRTC.WebRTCPeer),
 	}
-	defer func() {
-		fmt.Println("Closing libp2p host...")
-		if err := libp2pHost.Close(); err != nil {
-			fmt.Printf("Error closing libp2p host: %v\n", err)
-		}
-	}()
+}
 
-	fmt.Printf("✅ LibP2P Host created. Your Peer ID: %s\n", libp2pHost.ID().String())
-	fmt.Println("Your Multiaddrs (for others to connect directly if not using a tracker):")
-	for _, addr := range libp2pHost.Addrs() {
-		fmt.Printf("  - %s/p2p/%s\n", addr.String(), libp2pHost.ID().String())
-	}
-	fmt.Println("📢 Connect to your tracker using this Peer ID to discover other peers.")
-
-	libp2pHost.SetStreamHandler(WebRTCSignalingProtocolID, handleLibp2pSignalingStream)
-
-	peerConnection, err = webRTC.NewWebRTCPeer(handleIncomingDataChannelMessage)
-	if err != nil {
-		fmt.Printf("❌ Error creating WebRTC peer: %v\n", err)
-		return
-	}
-	defer func() {
-		fmt.Println("Closing WebRTC peer connection...")
-		if err := peerConnection.Close(); err != nil {
-			fmt.Printf("Error closing WebRTC peer: %v\n", err)
-		}
-	}()
-
+func (c *Client) connectToTracker(trackerAddr peer.AddrInfo) error {
+	fmt.Print("Enter your peer name: ")
 	scanner := bufio.NewScanner(os.Stdin)
-
-	for {
-		fmt.Println("\n📋 Available Commands:")
-		fmt.Println("  connect <multiaddr>  - Connect to a peer using their full multiaddress (e.g., /ip4/X.X.X.X/tcp/Y/p2p/Qm... )")
-		fmt.Println("  offer <target_libp2p_peer_id> - Create connection offer to a peer")
-		fmt.Println("  download <file>    - Download file from peer")
-		fmt.Println("  addfile <filename> - Add a file to your shared list")
-		fmt.Println("  listfiles          - List all available files on the network")
-		fmt.Println("  status             - Show connection status")
-		fmt.Println("  help               - Show instructions again")
-		fmt.Println("  exit               - Quit application")
-		fmt.Print("\n> ")
-
-		if !scanner.Scan() {
-			break
-		}
-
-		input := strings.TrimSpace(scanner.Text())
-		if input == "" {
-			continue
-		}
-
-		parts := strings.Fields(input)
-		cmd := parts[0]
-
-		switch cmd {
-		case "exit", "quit", "q":
-			// Set peer offline before exiting
-			err = repo.SetPeerOffline(peerID)
-			if err != nil {
-				fmt.Printf("⚠️  Warning: Failed to set peer offline in database: %v\n", err)
-			} else {
-				fmt.Printf("✅ Peer %s set to offline\n", peerID)
-			}
-			fmt.Println("👋 Goodbye!")
-			return
-
-		case "help", "instructions":
-			webRTC.PrintInstructions()
-
-		case "status":
-			if peerConnection.IsConnected() {
-				fmt.Println("✅ Status: Connected and ready to transfer files")
-			} else {
-				fmt.Println("⏳ Status: Not connected yet")
-			}
-
-		case "addfile":
-			if len(parts) < 2 {
-				fmt.Println("❌ Usage: addfile <filename>")
-				continue
-			}
-			filename := parts[1]
-			addFileCommand(filename)
-			err := torrentfile.CreateTorrentfile(filename)
-			if err != nil {
-				log.Fatalf("error in making torrent file: %v", err)
-			}
-		case "connect":
-			if len(parts) < 2 {
-				fmt.Println("❌ Usage: connect <full_multiaddress>")
-				fmt.Println("💡 Example: connect /ip4/192.168.1.100/tcp/4001/p2p/Qm...ABCD")
-				continue
-			}
-			maddrStr := parts[1]
-			maddr, err := multiaddr.NewMultiaddr(maddrStr)
-			if err != nil {
-				fmt.Printf("❌ Invalid multiaddress: %v\n", err)
-				continue
-			}
-			pi, err := peer.AddrInfoFromP2pAddr(maddr)
-			if err != nil {
-				fmt.Printf("❌ Could not parse peer info from multiaddress: %v\n", err)
-				continue
-			}
-			libp2pHost.Peerstore().AddAddrs(pi.ID, pi.Addrs, time.Duration(math.MaxInt64))
-			fmt.Printf("✅ Added peer %s with address %s to peerstore.\n", pi.ID.String(), maddrStr)
-			fmt.Println("💡 You can now try 'offer' command with this peer's ID.")
-
-		case "offer":
-			if len(parts) < 2 {
-				fmt.Println("❌ Usage: offer <target_libp2p_peer_id>")
-				continue
-			}
-			targetPeerIDStr := parts[1]
-			targetID, err := peer.Decode(targetPeerIDStr)
-			if err != nil {
-				fmt.Printf("❌ Invalid libp2p Peer ID: %v\n", err)
-				continue
-			}
-			sendLibp2pOffer(ctx, libp2pHost, targetID)
-
-		case "download":
-			if len(parts) != 2 {
-				fmt.Println("❌ Usage: download <filename>")
-				fmt.Println("💡 Example: download hello.txt")
-				continue
-			}
-			filename := parts[1]
-			handleDownloadCommand(filename)
-
-		case "listfiles":
-			db.ListAvailableFiles(db.DB)
-
-		default:
-			fmt.Printf("❌ Unknown command: %s\n", cmd)
-			fmt.Println("💡 Type 'help' to see available commands")
-		}
+	if !scanner.Scan() {
+		return errors.New("failed to read peer name")
 	}
-}
+	c.peerName = scanner.Text()
+	if c.peerName == "" {
+		return errors.New("peer name cannot be empty")
+	}
 
-// addFileCommand calculates file hash and size, then adds it to the database.
-func addFileCommand(filename string) {
-	fileHash, filesize, err := calculateFileHash(filename)
+	// THE KEY FIX: Explicitly connect to the peer to add its address to the peerstore.
+	// This solves the "no addresses" error.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.host.Connect(ctx, trackerAddr); err != nil {
+		return fmt.Errorf("failed to connect to tracker's AddrInfo: %w", err)
+	}
+	log.Println("Successfully connected to tracker peer.")
+
+
+	// Now open the stream
+	s, err := c.host.NewStream(context.Background(), trackerAddr.ID, p2p.TrackerProtocolID)
 	if err != nil {
-		fmt.Printf("Error calculating hash for %s: %v\n", filename, err)
-		return
+		return fmt.Errorf("failed to open stream to tracker: %w", err)
 	}
-	err = db.AddFile(db.DB, fileHash, filename, filesize, libp2pHost.ID().String())
-	if err != nil {
-		fmt.Printf("Failed to add file %s to database: %v\n", filename, err)
-	} else {
-		fmt.Printf("✅ File '%s' added successfully and announced locally.\n", filename)
-	}
-}
+	c.trackerStream = s
+	c.encoder = json.NewEncoder(s)
+	c.decoder = json.NewDecoder(s)
 
-// handleDownloadCommand requests a file from the connected WebRTC peer.
-func handleDownloadCommand(filename string) {
-	if !peerConnection.IsConnected() {
-		fmt.Println("❌ Not connected to any peer")
-		fmt.Println("💡 Complete the connection setup first using 'offer' command.")
-		return
+	namePayload, _ := json.Marshal(c.peerName)
+	msg := p2p.Message{Command: "NAME", Payload: namePayload}
+
+	if err := c.encoder.Encode(msg); err != nil {
+		return fmt.Errorf("failed to send name to tracker: %w", err)
 	}
 
-	fmt.Printf("📥 Requesting file: %s\n", filename)
-	err := peerConnection.RequestFile(filename)
-	if err != nil {
-		fmt.Printf("❌ Error requesting file: %v\n", err)
-		return
+	var welcomeMsg p2p.Message
+	if err := c.decoder.Decode(&welcomeMsg); err != nil {
+		return fmt.Errorf("failed to read welcome message from tracker: %w", err)
 	}
-
-	fmt.Println("⏳ File request sent. Waiting for peer to send the file...")
-	fmt.Println("💡 The file will be saved with 'downloaded_' prefix when received.")
-}
-
-// processes incoming WebRTC signaling messages (offers/answers) over a libp2p stream.
-func handleLibp2pSignalingStream(s network.Stream) {
-	defer func() {
-		fmt.Printf("Closing signaling stream from %s\n", s.Conn().RemotePeer().String())
-		s.Close()
-	}()
-
-	fmt.Printf("\n📢 Received signaling stream from peer %s\n", s.Conn().RemotePeer().String())
-	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
-
-	for {
-		str, err := rw.ReadString('\n')
-		if err != nil {
-			if err != io.EOF {
-				fmt.Printf("Error reading from libp2p signaling stream (%s): %v\n", s.Conn().RemotePeer().String(), err)
-			}
-			return
-		}
-
-		str = strings.TrimSpace(str)
-		if str == "" {
-			continue
-		}
-
-		parts := strings.SplitN(str, ":", 2)
-		if len(parts) != 2 {
-			fmt.Printf("Malformed signaling message received from %s: %s\n", s.Conn().RemotePeer().String(), str)
-			continue
-		}
-		msgType := parts[0]
-		data := parts[1] // This is the SDP string (Base64 encoded)
-
-		switch msgType {
-		case "OFFER":
-			fmt.Printf("Received WebRTC offer from %s. Creating answer...\n", s.Conn().RemotePeer().String())
-
-			decodedSDP, err := base64.StdEncoding.DecodeString(data)
-			if err != nil {
-				fmt.Printf("❌ Error decoding Base64 SDP offer from (%s): %v\n", s.Conn().RemotePeer().String(), err)
-				continue
-			}
-			sdpString := string(decodedSDP)
-			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
-
-			answer, err := peerConnection.CreateAnswer(sdpString)
-			if err != nil {
-				fmt.Printf("❌ Error creating answer for offer from %s: %v\n", s.Conn().RemotePeer().String(), err)
-				_, writeErr := rw.WriteString(fmt.Sprintf("ERROR:%v\n", err))
-				if writeErr != nil {
-					fmt.Printf("Error sending error message: %v\n", writeErr)
-				}
-				rw.Flush()
-				return
-			}
-
-			encodedAnswer := base64.StdEncoding.EncodeToString([]byte(answer))
-			_, err = rw.WriteString(fmt.Sprintf("ANSWER:%s\n", encodedAnswer)) // Send encoded answer
-			if err != nil {
-				fmt.Printf("❌ Error sending answer to %s: %v\n", s.Conn().RemotePeer().String(), err)
-				return
-			}
-			err = rw.Flush()
-			if err != nil {
-				fmt.Printf("❌ Error flushing answer to %s: %v\n", s.Conn().RemotePeer().String(), err)
-				return
-			}
-			fmt.Printf("✅ Answer sent to peer %s. Waiting for WebRTC connection...\n", s.Conn().RemotePeer().String())
-
-			go func(remotePeerID peer.ID) {
-				if err := peerConnection.WaitForConnection(30 * time.Second); err != nil {
-					fmt.Printf("❌ WebRTC Connection timeout with peer %s: %v\n", remotePeerID.String(), err)
-				} else {
-					fmt.Printf("🎉 WebRTC Connection established with peer %s!\n", remotePeerID.String())
-					fmt.Println("✅ You can now transfer files using the 'download' command")
-				}
-			}(s.Conn().RemotePeer())
-
-		case "ANSWER":
-			fmt.Printf("Received WebRTC answer from %s. Completing connection...\n", s.Conn().RemotePeer().String())
-			// DECODE Base64 SDP
-			decodedSDP, err := base64.StdEncoding.DecodeString(data)
-			if err != nil {
-				fmt.Printf("❌ Error decoding Base64 SDP answer from %s: %v\n", s.Conn().RemotePeer().String(), err)
-				continue
-			}
-			sdpString := string(decodedSDP)
-			// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
-
-			err = peerConnection.SetAnswer(sdpString)
-			if err != nil {
-				fmt.Printf("❌ Error applying answer from %s: %v\n", s.Conn().RemotePeer().String(), err)
-				return
-			}
-			fmt.Println("✅ Answer applied. WebRTC connection should be establishing.")
-
-		case "ERROR":
-			fmt.Printf("Received ERROR from %s during signaling: %s\n", s.Conn().RemotePeer().String(), data)
-
-		default:
-			fmt.Printf("Unknown signaling message type: %s from peer %s\n", msgType, s.Conn().RemotePeer().String())
-		}
-	}
-}
-
-// sendLibp2pOffer initiates the WebRTC offer process by sending an SDP offer over a libp2p stream.
-func sendLibp2pOffer(ctx context.Context, h host.Host, targetPeerID peer.ID) {
-	fmt.Println("🔄 Creating WebRTC offer...")
-	offer, err := peerConnection.CreateOffer()
-	if err != nil {
-		fmt.Printf("❌ Error creating offer: %v\n", err)
-		return
-	}
-	fmt.Printf("DEBUG: Generated Offer SDP (length %d):\n%s\n", len(offer), offer)
-
-	encodedOffer := base64.StdEncoding.EncodeToString([]byte(offer))
-
-	s, err := h.NewStream(ctx, targetPeerID, WebRTCSignalingProtocolID)
-	if err != nil {
-		fmt.Printf("❌ Failed to open libp2p stream to %s: %v\n", targetPeerID.String(), err)
-		return
-	}
-	defer func() {
-		fmt.Printf("Closing signaling stream to %s\n", targetPeerID.String())
-		s.Close()
-	}()
-
-	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
-
-	_, err = rw.WriteString(fmt.Sprintf("OFFER:%s\n", encodedOffer)) // Send encoded offer
-	if err != nil {
-		fmt.Printf("❌ Failed to send offer to %s: %v\n", targetPeerID.String(), err)
-		return
-	}
-	err = rw.Flush()
-	if err != nil {
-		fmt.Printf("❌ Failed to flush offer to %s: %v\n", targetPeerID.String(), err)
-		return
-	}
-	fmt.Printf("✅ Offer sent to peer %s. Waiting for their answer...\n", targetPeerID.String())
-
-	answerStr, err := rw.ReadString('\n')
-	if err != nil {
-		fmt.Printf("❌ Error reading answer from %s: %v\n", targetPeerID.String(), err)
-		return
-	}
-	answerStr = strings.TrimSpace(answerStr)
-
-	answerParts := strings.SplitN(answerStr, ":", 2)
-	if len(answerParts) != 2 || answerParts[0] != "ANSWER" {
-		fmt.Printf("Malformed answer received from %s: %s\n", targetPeerID.String(), answerStr)
-		return
-	}
-	data := answerParts[1]
-
-	decodedSDP, err := base64.StdEncoding.DecodeString(data)
-	if err != nil {
-		fmt.Printf("❌ Error decoding Base64 SDP answer from %s: %v\n", targetPeerID.String(), err)
-		return
-	}
-	sdpString := string(decodedSDP)
-	// fmt.Printf("DEBUG: Received (decoded) SDP data (length %d):\n%s\n", len(sdpString), sdpString)
-
-	fmt.Printf("Received WebRTC answer from %s. Completing connection...\n", targetPeerID.String())
-	err = peerConnection.SetAnswer(sdpString) // Use decoded SDP
-	if err != nil {
-		fmt.Printf("❌ Error applying answer from %s: %v\n", targetPeerID.String(), err)
-		return
-	}
-
-	fmt.Println("⏳ Establishing WebRTC connection...")
-	go func(remotePeerID peer.ID) {
-		if err := peerConnection.WaitForConnection(30 * time.Second); err != nil {
-			fmt.Printf("❌ WebRTC Connection timeout with peer %s: %v\n", remotePeerID.String(), err)
-		} else {
-			fmt.Printf("🎉 WebRTC Connection established with peer %s!\n", remotePeerID.String())
-			fmt.Println("✅ You can now transfer files using the 'download' command")
-		}
-	}(targetPeerID)
-}
-
-// handleIncomingDataChannelMessage processes messages received on the WebRTC DataChannel.
-func handleIncomingDataChannelMessage(msg webrtc.DataChannelMessage, p *webRTC.WebRTCPeer) {
-	if msg.IsString {
-		cmd, encodedFilename, filesizeStr := webRTC.ParseCommand(string(msg.Data))
-		filenameBytes, _ := base64.StdEncoding.DecodeString(encodedFilename)
-		filename := string(filenameBytes)
-
-		var filesize int64
-		if filesizeStr != "" {
-			var err error
-			filesize, err = strconv.ParseInt(filesizeStr, 10, 64)
-			if err != nil {
-				fmt.Printf("❌ Error parsing filesize '%s': %v\n", filesizeStr, err)
-				return
-			}
-		}
-
-		switch cmd {
-		case "REQUEST_FILE":
-			fmt.Printf("⬆️ Received request for file: %s\n", filename)
-			err := sendFile(p, filename)
-			if err != nil {
-				fmt.Printf("❌ Error sending file '%s': %v\n", filename, err)
-			}
-
-		case "FILE_START":
-			file, err := os.Create("downloaded_" + filename)
-			if err != nil {
-				fmt.Printf("❌ Failed to create file: %v\n", err)
-				return
-			}
-			p.SetFileWriter(file)
-			fmt.Printf("📁 Receiving file: %s (Size: %s)\n", filename, webRTC.FormatFileSize(filesize))
-
-		case "FILE_END":
-			if p.GetFileWriter() != nil {
-				p.GetFileWriter().Close()
-				fmt.Println("✅ File received successfully")
-				p.SetFileWriter(nil)
-			}
-		default:
-			fmt.Printf("Received unknown command on data channel: %s\n", cmd)
-		}
-	} else {
-		if p.GetFileWriter() != nil {
-			if _, err := p.GetFileWriter().Write(msg.Data); err != nil {
-				fmt.Printf("❌ Error writing to file: %v\n", err)
-			}
-		}
-	}
-}
-
-// sendFile reads a file from disk and sends it in chunks over the WebRTC data channel.
-func sendFile(p *webRTC.WebRTCPeer, filename string) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("could not open file '%s': %w", filename, err)
-	}
-	defer file.Close()
-
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("could not get file info for '%s': %w", filename, err)
-	}
-
-	filesize := fileInfo.Size()
-	encodedName := base64.StdEncoding.EncodeToString([]byte(filename))
-
-	cmdStart := fmt.Sprintf("FILE_START:%s:%d", encodedName, filesize)
-	if err := p.SendTextData(cmdStart); err != nil {
-		return fmt.Errorf("failed to send FILE_START command: %w", err)
-	}
-
-	buffer := make([]byte, 16*1024)
-	for {
-		n, err := file.Read(buffer)
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("failed to read file chunk: %w", err)
-		}
-		if n == 0 {
-			break
-		}
-
-		if err := p.SendBinaryData(buffer[:n]); err != nil {
-			return fmt.Errorf("failed to send file chunk: %w", err)
-		}
-	}
-
-	cmdEnd := fmt.Sprintf("FILE_END:%s", encodedName)
-	if err := p.SendTextData(cmdEnd); err != nil {
-		return fmt.Errorf("failed to send FILE_END command: %w", err)
-	}
-
-	fmt.Printf("✅ File '%s' sent successfully.\n", filename)
+	log.Printf("✅ Tracker handshake complete. Welcome message: %s", welcomeMsg.Command)
 	return nil
 }
 
-// calculateFileHash computes the SHA256 hash and size of a given file.
-func calculateFileHash(filename string) (string, int64, error) {
-	file, err := os.Open(filename)
+// ... All other functions (commandLoop, addFile, listFiles, get, etc.) remain the same as the last full version I provided ...
+func (c *Client) commandLoop() {
+	scanner := bufio.NewScanner(os.Stdin)
+	printClientInstructions()
+	for {
+		fmt.Print("> ")
+		if !scanner.Scan() {
+			break
+		}
+		parts := strings.Fields(scanner.Text())
+		if len(parts) == 0 {
+			continue
+		}
+		cmd, args := parts[0], parts[1:]
+
+		var err error
+		switch cmd {
+		case "help":
+			printClientInstructions()
+		case "add":
+			if len(args) != 1 {
+				err = errors.New("usage: add <filepath>")
+			} else {
+				err = c.addFile(args[0])
+			}
+		case "list":
+			err = c.listFiles()
+
+		case "listpeers":
+			err = c.listPeers()
+
+		case "get":
+			if len(args) != 1 {
+				err = errors.New("usage: get <file_id>")
+			} else {
+				err = c.get(args[0])
+			}
+		case "exit":
+			return
+		default:
+			err = errors.New("unknown command")
+		}
+		if err != nil {
+			log.Printf("Error: %v", err)
+		}
+	}
+}
+
+func (c *Client) addFile(filePath string) error {
+	file, err := os.Open(filePath)
 	if err != nil {
-		return "", 0, fmt.Errorf("could not open file: %w", err)
+		return err
 	}
 	defer file.Close()
-
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
-		return "", 0, fmt.Errorf("could not hash file: %w", err)
+		return err
 	}
-	fileInfo, err := file.Stat()
+
+	payload, _ := json.Marshal(p2p.AnnounceFilePayload{
+		FileHash: fmt.Sprintf("%x", hasher.Sum(nil)),
+		Filename: filepath.Base(filePath),
+		FileSize: info.Size(),
+	})
+	if err := c.encoder.Encode(p2p.Message{Command: "ANNOUNCE_FILE", Payload: payload}); err != nil {
+		return err
+	}
+
+	var resp p2p.Message
+	if err := c.decoder.Decode(&resp); err != nil {
+		return err
+	}
+	if resp.Command != "ACK" {
+		return fmt.Errorf("tracker responded with error: %s", resp.Payload)
+	}
+
+	if err := torrentfile.CreateTorrentFile(filePath); err != nil {
+		log.Printf("Warning: failed to create .torrent file: %v", err)
+	}
+
+	fmt.Printf("File '%s' announced successfully.\n", filepath.Base(filePath))
+	return nil
+}
+
+func (c *Client) listFiles() error {
+	if err := c.encoder.Encode(p2p.Message{Command: "LIST_FILES"}); err != nil {
+		return err
+	}
+	var resp p2p.Message
+	if err := c.decoder.Decode(&resp); err != nil {
+		return err
+	}
+	if resp.Command != "FILE_LIST" {
+		return fmt.Errorf("tracker responded with error: %s", resp.Payload)
+	}
+
+	var files []db.File
+	if err := json.Unmarshal(resp.Payload, &files); err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		fmt.Println("No files available on the tracker.")
+		return nil
+	}
+
+	fmt.Println("\nAvailable Files:")
+	for _, file := range files {
+		fmt.Println("--------------------")
+		fmt.Printf("  ID: %s\n  Name: %s\n  Size: %s\n", file.ID, file.Filename, torrentiumWebRTC.FormatFileSize(file.FileSize))
+	}
+	fmt.Println("--------------------")
+	return nil
+}
+
+
+func (c *Client) listPeers() error {
+	if err := c.encoder.Encode(p2p.Message{Command: "LIST_PEERS"}); err != nil {
+		return err
+	}
+	var resp p2p.Message
+	if err := c.decoder.Decode(&resp); err != nil {
+		return err
+	}
+	if resp.Command != "PEER_LIST_ALL" {
+		return fmt.Errorf("tracker responded with an error: %s", resp.Payload)
+	}
+
+	var peers []db.Peer
+	if err := json.Unmarshal(resp.Payload, &peers); err != nil {
+		return err
+	}
+
+	fmt.Println("\nOnline Peers:")
+	fmt.Println("----------------------------------------")
+	if len(peers) <= 1 {
+		fmt.Println("You are the only peer currently online.")
+	} else {
+		for _, peer := range peers {
+			// Don't list yourself
+			if peer.PeerID == c.host.ID().String() {
+				continue
+			}
+			fmt.Printf("  Name: %s\n  ID:   %s\n", peer.Name, peer.PeerID)
+			fmt.Println("----------------------------------------")
+		}
+	}
+	return nil
+}
+
+
+func (c *Client) get(fileIDStr string) error {
+	fileID, err := uuid.Parse(fileIDStr)
 	if err != nil {
-		return "", 0, fmt.Errorf("could not get file info: %w", err)
+		return fmt.Errorf("invalid file ID format: %w", err)
 	}
-	return fmt.Sprintf("%x", hasher.Sum(nil)), fileInfo.Size(), nil
+
+	payload, _ := json.Marshal(p2p.GetPeersPayload{FileID: fileID})
+	if err := c.encoder.Encode(p2p.Message{Command: "GET_PEERS_FOR_FILE", Payload: payload}); err != nil {
+		return err
+	}
+	var resp p2p.Message
+	if err := c.decoder.Decode(&resp); err != nil {
+		return err
+	}
+	if resp.Command != "PEER_LIST" {
+		return fmt.Errorf("tracker responded with error: %s", resp.Payload)
+	}
+
+	var peers []db.PeerFile
+	if err := json.Unmarshal(resp.Payload, &peers); err != nil {
+		return err
+	}
+	if len(peers) == 0 {
+		return errors.New("no online peers found for this file")
+	}
+
+	fmt.Println("Found online peers:")
+	for i, p := range peers {
+		fmt.Printf("  [%d] Peer DB ID: %s (Score: %.2f)\n", i, p.PeerID, p.Score)
+	}
+	fmt.Print("Select a peer to download from (enter number): ")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	choice, err := strconv.Atoi(scanner.Text())
+	if err != nil || choice < 0 || choice >= len(peers) {
+		return errors.New("invalid selection")
+	}
+	selectedPeer := peers[choice]
+
+	peerInfoPayload, _ := json.Marshal(p2p.GetPeerInfoPayload{PeerDBID: selectedPeer.PeerID})
+	if err := c.encoder.Encode(p2p.Message{Command: "GET_PEER_INFO", Payload: peerInfoPayload}); err != nil {
+		return err
+	}
+	if err := c.decoder.Decode(&resp); err != nil || resp.Command != "PEER_INFO" {
+		return errors.New("could not retrieve peer's libp2p info")
+	}
+	var peerInfo db.Peer
+	if err := json.Unmarshal(resp.Payload, &peerInfo); err != nil {
+		return err
+	}
+
+	targetPeerID, err := peer.Decode(peerInfo.PeerID)
+	if err != nil {
+		return err
+	}
+
+	log.Println("Initiating WebRTC connection...")
+	webRTCPeer, err := c.initiateWebRTCConnection(targetPeerID)
+	if err != nil {
+		return fmt.Errorf("WebRTC connection failed: %w", err)
+	}
+	c.addWebRTCPeer(targetPeerID, webRTCPeer)
+	log.Println("✅ WebRTC connection established!")
+
+	log.Printf("Requesting file %s from peer...", fileID)
+	requestPayload := map[string]string{"command": "REQUEST_FILE", "file_id": fileID.String()}
+	if err := webRTCPeer.Send(requestPayload); err != nil {
+		return fmt.Errorf("failed to send file request: %w", err)
+	}
+
+	fmt.Println("File request sent. Waiting for transfer to complete...")
+	return nil
+}
+
+func (c *Client) initiateWebRTCConnection(targetPeerID peer.ID) (*torrentiumWebRTC.WebRTCPeer, error) {
+	s, err := c.host.NewStream(context.Background(), targetPeerID, p2p.SignalingProtocolID)
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close()
+
+	webRTCPeer, err := torrentiumWebRTC.NewWebRTCPeer(c.onDataChannelMessage)
+	if err != nil {
+		return nil, err
+	}
+
+	offer, err := webRTCPeer.CreateOffer()
+	if err != nil {
+		return nil, err
+	}
+
+	encoder := json.NewEncoder(s)
+	if err := encoder.Encode(offer); err != nil {
+		return nil, err
+	}
+
+	var answer string
+	decoder := json.NewDecoder(s)
+	if err := decoder.Decode(&answer); err != nil {
+		return nil, err
+	}
+
+	if err := webRTCPeer.SetAnswer(answer); err != nil {
+		return nil, err
+	}
+
+	if err := webRTCPeer.WaitForConnection(30 * time.Second); err != nil {
+		return nil, err
+	}
+	return webRTCPeer, nil
+}
+
+func (c *Client) handleWebRTCOffer(offer, remotePeerIDStr string) (string, error) {
+	remotePeerID, err := peer.Decode(remotePeerIDStr)
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf("Handling incoming WebRTC offer from %s", remotePeerID)
+	webRTCPeer, err := torrentiumWebRTC.NewWebRTCPeer(c.onDataChannelMessage)
+	if err != nil {
+		return "", err
+	}
+
+	answer, err := webRTCPeer.CreateAnswer(offer)
+	if err != nil {
+		return "", err
+	}
+
+	c.addWebRTCPeer(remotePeerID, webRTCPeer)
+	return answer, nil
+}
+
+func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, p *torrentiumWebRTC.WebRTCPeer) {
+	if msg.IsString {
+		log.Printf("Received message: %s\n", string(msg.Data))
+	} else {
+		if writer := p.GetFileWriter(); writer != nil {
+			if _, err := writer.Write(msg.Data); err != nil {
+				log.Printf("Error writing file chunk: %v", err)
+			}
+		} else {
+			log.Println("Received binary data but no file writer is active.")
+		}
+	}
+}
+
+func (c *Client) addWebRTCPeer(id peer.ID, p *torrentiumWebRTC.WebRTCPeer) {
+	c.peersMux.Lock()
+	defer c.peersMux.Unlock()
+	c.webRTCPeers[id] = p
+}
+
+func setupGracefulShutdown(h host.Host) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ch
+		log.Println("Shutting down...")
+		if err := h.Close(); err != nil {
+			log.Printf("Error closing libp2p host: %v", err)
+		}
+		os.Exit(0)
+	}()
+}
+
+func printClientInstructions() {
+	fmt.Println(`
+📖 Torrentium Client Commands:
+  help          - Show this help message.
+  add <path>    - Announce a local file to the tracker.
+  list          - List all files available on the tracker.
+  listpeers     - List all currently online peers.
+  get <file_id> - Find and download a file from a peer.
+  exit          - Shutdown the client.`)
 }

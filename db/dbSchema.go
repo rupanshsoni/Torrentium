@@ -7,14 +7,16 @@ import (
 )
 
 type Peer struct {
-	ID        uuid.UUID `db:"id"`
-	PeerID    string    `db:"peer_id"`
-	Name      string    `db:"name"`
-	IPAddress string    `db:"ip_address"` // iska datatype is INET in database
-	IsOnline  bool      `db:"is_online"`
-	LastSeen  time.Time `db:"last_seen"`
-	CreatedAt time.Time `db:"created_at"`
+	ID         uuid.UUID  `db:"id"`
+	PeerID     string     `db:"peer_id"`
+	Name       string     `db:"name"`
+	IPAddress  string     `db:"ip_address"` // INET type in DB; handled as string in Go
+	IsOnline   bool       `db:"is_online"`
+	Multiaddrs []string   `db:"multiaddrs"` // PostgreSQL TEXT[] 
+	LastSeen   time.Time  `db:"last_seen"`
+	CreatedAt  time.Time  `db:"created_at"`
 }
+
 
 type File struct {
 	ID          uuid.UUID `db:"id"`

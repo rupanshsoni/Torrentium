@@ -1,8 +1,10 @@
+// cmd/tracker/main.go
 package main
 
 import (
 	"context"
 	"log"
+	"os"
 
 	"torrentium/db"
 	"torrentium/p2p"
@@ -12,14 +14,26 @@ import (
 )
 
 func main() {
-
-	err := godotenv.Load()
-	if err != nil {
+	if err := godotenv.Load(); err != nil {
 		log.Fatal("Unable to access .env file")
 	}
+
+
 	db.InitDB()
 
-	h, err := p2p.NewHost(context.Background())
+	// On startup, mark all peers as offline for a clean slate.
+	repo := db.NewRepository(db.DB)
+	if err := repo.MarkAllPeersOffline(context.Background()); err != nil {
+		log.Printf("Warning: Could not mark all peers offline on startup: %v", err)
+	}
+	log.Println("-> Cleared stale online peer statuses.")
+
+	listenAddr := os.Getenv("TRACKER_LISTEN_ADDR")
+	if listenAddr == "" {
+		log.Fatal("TRACKER_LISTEN_ADDR environment variable not set.")
+	}
+
+	h, err := p2p.NewHost(context.Background(), listenAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -27,7 +41,7 @@ func main() {
 	t := tracker.NewTracker()
 	log.Println("-> Tracker Initialized")
 
-	p2p.RegisterProtocol(h, t)
+	p2p.RegisterTrackerProtocol(h, t)
 
 	select {}
 }

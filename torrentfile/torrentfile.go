@@ -1,7 +1,9 @@
+// torrentfile/torrentfile.go
 package torrentfile
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"time"
@@ -9,47 +11,44 @@ import (
 	bencode "github.com/jackpal/bencode-go"
 )
 
-type Torrentmeta struct {
-	Filename   string    `bencode:"filename"`
-	Length     int64     `bencode:"length"`
-	Hash       string    `bencode:"Hash"`
-	Created_at time.Time `bencode:"Created_at"`
+type TorrentMeta struct {
+	Filename  string    `bencode:"filename"`
+	Length    int64     `bencode:"length"`
+	Hash      string    `bencode:"hash"`
+	CreatedAt time.Time `bencode:"created_at"`
 }
 
-func CreateTorrentfile(filename string) error {
+func CreateTorrentFile(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+
 	info, err := file.Stat()
 	if err != nil {
 		return err
 	}
-	hashcalc := sha1.New()
-	_, err = io.Copy(hashcalc, file)
-	if err != nil {
+
+	hashCalc := sha256.New()
+	if _, err = io.Copy(hashCalc, file); err != nil {
 		return err
 	}
-	hashSum := hashcalc.Sum(nil)
+	hexHash := hex.EncodeToString(hashCalc.Sum(nil))
 
-	meta := Torrentmeta{
-		Filename:   info.Name(),
-		Length:     info.Size(),
-		Hash:       (string)(hashSum),
-		Created_at: time.Now().UTC(),
+	meta := TorrentMeta{
+		Filename:  info.Name(),
+		Length:    info.Size(),
+		Hash:      hexHash,
+		CreatedAt: time.Now().UTC(),
 	}
 
 	outputName := filename + ".torrent"
-
 	out, err := os.Create(outputName)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	err = bencode.Marshal(out, meta) // convert into bit torrent file
-	if err != nil {
-		return err
-	}
-	return nil
+
+	return bencode.Marshal(out, meta)
 }
