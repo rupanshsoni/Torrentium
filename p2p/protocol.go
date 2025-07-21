@@ -7,7 +7,7 @@ import (
 	"io"
 	"log"
 	"strings"
-
+	// "torrentium/db"
 	"torrentium/tracker"
 
 	"github.com/google/uuid"
@@ -17,13 +17,11 @@ import (
 
 const TrackerProtocolID = "/torrentium/tracker/1.0"
 
-// Message represents a command sent between client and tracker
 type Message struct {
 	Command string          `json:"command"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// Payloads for specific commands
 type AnnounceFilePayload struct {
 	FileHash string `json:"file_hash"`
 	Filename string `json:"filename"`
@@ -41,9 +39,9 @@ type GetPeerInfoPayload struct {
 func RegisterTrackerProtocol(h host.Host, t *tracker.Tracker) {
 	h.SetStreamHandler(TrackerProtocolID, func(s network.Stream) {
 		log.Printf("New peer connected: %s", s.Conn().RemotePeer())
-		ctx := context.Background() // Use a more specific context if available
+		ctx := context.Background()
 		defer s.Close()
-		defer t.RemovePeer(ctx, s.Conn().RemotePeer().String()) // Mark peer offline on disconnect
+		defer t.RemovePeer(ctx, s.Conn().RemotePeer().String())
 
 		if err := handleStream(ctx, s, t); err != nil {
 			if err != io.EOF {
@@ -58,11 +56,14 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 	encoder := json.NewEncoder(s)
 	remotePeerID := s.Conn().RemotePeer().String()
 
-	// Initial Handshake
 	var nameMsg Message
 	if err := decoder.Decode(&nameMsg); err != nil {
 		return err
 	}
+	if nameMsg.Command != "NAME" {
+		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Expected NAME command for handshake"`)})
+	}
+
 	var peerName string
 	if err := json.Unmarshal(nameMsg.Payload, &peerName); err != nil || peerName == "" {
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Invalid name"`)})
@@ -70,13 +71,13 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 
 	ip := strings.Split(s.Conn().RemoteMultiaddr().String(), "/")[2]
 	if err := t.AddPeer(ctx, remotePeerID, peerName, ip); err != nil {
+		log.Printf("CRITICAL: Failed to AddPeer to database: %v", err)
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Failed to register with tracker"`)})
 	}
 
 	welcomePayload, _ := json.Marshal(t.ListPeers())
 	encoder.Encode(Message{Command: "WELCOME", Payload: welcomePayload})
 
-	// Command Loop
 	for {
 		var msg Message
 		if err := decoder.Decode(&msg); err != nil {
@@ -90,19 +91,22 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 		case "ANNOUNCE_FILE":
 			var p AnnounceFilePayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
-				response.Command = "ERROR"
-				continue
-			}
-			err := t.AddFileWithPeer(ctx, p.FileHash, p.Filename, p.FileSize, remotePeerID)
-			if err != nil {
+				log.Printf("ERROR in ANNOUNCE_FILE (unmarshal): %v", err)
 				response.Command = "ERROR"
 			} else {
-				response.Command = "ACK"
+				err := t.AddFileWithPeer(ctx, p.FileHash, p.Filename, p.FileSize, remotePeerID)
+				if err != nil {
+					log.Printf("ERROR in ANNOUNCE_FILE (db): %v", err) // Added logging
+					response.Command = "ERROR"
+				} else {
+					response.Command = "ACK"
+				}
 			}
 
 		case "LIST_FILES":
 			files, err := t.GetAllFiles(ctx)
 			if err != nil {
+				log.Printf("ERROR in LIST_FILES (db): %v", err) // Added logging
 				response.Command = "ERROR"
 			} else {
 				response.Command = "FILE_LIST"
@@ -112,39 +116,45 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 		case "GET_PEERS_FOR_FILE":
 			var p GetPeersPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
-				response.Command = "ERROR"
-				continue
-			}
-			peers, err := t.GetOnlinePeersForFile(ctx, p.FileID)
-			if err != nil {
+				log.Printf("ERROR in GET_PEERS_FOR_FILE (unmarshal): %v", err)
 				response.Command = "ERROR"
 			} else {
-				response.Command = "PEER_LIST"
-				response.Payload, _ = json.Marshal(peers)
+				peers, err := t.GetOnlinePeersForFile(ctx, p.FileID)
+				if err != nil {
+					log.Printf("ERROR in GET_PEERS_FOR_FILE (db): %v", err) // Added logging
+					response.Command = "ERROR"
+				} else {
+					response.Command = "PEER_LIST"
+					response.Payload, _ = json.Marshal(peers)
+				}
 			}
 
 		case "GET_PEER_INFO":
 			var p GetPeerInfoPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
-				response.Command = "ERROR"
-				continue
-			}
-			peerInfo, err := t.GetPeerInfoByDBID(ctx, p.PeerDBID)
-			if err != nil {
+				log.Printf("ERROR in GET_PEER_INFO (unmarshal): %v", err)
 				response.Command = "ERROR"
 			} else {
-				response.Command = "PEER_INFO"
-				response.Payload, _ = json.Marshal(peerInfo)
+				peerInfo, err := t.GetPeerInfoByDBID(ctx, p.PeerDBID)
+				if err != nil {
+					log.Printf("ERROR in GET_PEER_INFO (db): %v", err) // Added logging
+					response.Command = "ERROR"
+				} else {
+					response.Command = "PEER_INFO"
+					response.Payload, _ = json.Marshal(peerInfo)
+				}
 			}
 
 		case "LIST_PEERS":
 			peers, err := t.GetOnlinePeers(ctx)
 			if err != nil {
+				log.Printf("ERROR in LIST_PEERS (db): %v", err) // Added logging
 				response.Command = "ERROR"
 			} else {
 				response.Command = "PEER_LIST_ALL"
 				response.Payload, _ = json.Marshal(peers)
 			}
+
 		default:
 			response.Command = "ERROR"
 			response.Payload, _ = json.Marshal("Unknown command")

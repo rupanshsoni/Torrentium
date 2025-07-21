@@ -1,0 +1,1 @@
+echo '✅ Torrentium database tables successfully reset.'
