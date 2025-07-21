@@ -25,6 +25,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	// "github.com/multiformats/go-multiaddr"
 	"github.com/pion/webrtc/v3"
 
 	"torrentium/db"
@@ -95,8 +96,6 @@ func (c *Client) connectToTracker(trackerAddr peer.AddrInfo) error {
 		return errors.New("peer name cannot be empty")
 	}
 
-	// THE KEY FIX: Explicitly connect to the peer to add its address to the peerstore.
-	// This solves the "no addresses" error.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := c.host.Connect(ctx, trackerAddr); err != nil {
@@ -104,8 +103,6 @@ func (c *Client) connectToTracker(trackerAddr peer.AddrInfo) error {
 	}
 	log.Println("Successfully connected to tracker peer.")
 
-
-	// Now open the stream
 	s, err := c.host.NewStream(context.Background(), trackerAddr.ID, p2p.TrackerProtocolID)
 	if err != nil {
 		return fmt.Errorf("failed to open stream to tracker: %w", err)
@@ -114,11 +111,21 @@ func (c *Client) connectToTracker(trackerAddr peer.AddrInfo) error {
 	c.encoder = json.NewEncoder(s)
 	c.decoder = json.NewDecoder(s)
 
-	namePayload, _ := json.Marshal(c.peerName)
-	msg := p2p.Message{Command: "NAME", Payload: namePayload}
+	// Send name and listen addresses in handshake
+	addrs := c.host.Addrs()
+	addrStrings := make([]string, len(addrs))
+	for i, addr := range addrs {
+		addrStrings[i] = addr.String()
+	}
+
+	handshakePayload, _ := json.Marshal(p2p.HandshakePayload{
+		Name:        c.peerName,
+		ListenAddrs: addrStrings,
+	})
+	msg := p2p.Message{Command: "HANDSHAKE", Payload: handshakePayload}
 
 	if err := c.encoder.Encode(msg); err != nil {
-		return fmt.Errorf("failed to send name to tracker: %w", err)
+		return fmt.Errorf("failed to send handshake to tracker: %w", err)
 	}
 
 	var welcomeMsg p2p.Message
@@ -129,7 +136,42 @@ func (c *Client) connectToTracker(trackerAddr peer.AddrInfo) error {
 	return nil
 }
 
-// ... All other functions (commandLoop, addFile, listFiles, get, etc.) remain the same as the last full version I provided ...
+func (c *Client) listPeers() error {
+	if err := c.encoder.Encode(p2p.Message{Command: "LIST_PEERS"}); err != nil {
+		return err
+	}
+	var resp p2p.Message
+	if err := c.decoder.Decode(&resp); err != nil {
+		return err
+	}
+	if resp.Command != "PEER_LIST_ALL" {
+		return fmt.Errorf("tracker responded with an error: %s", resp.Payload)
+	}
+
+	var peers []db.Peer
+	if err := json.Unmarshal(resp.Payload, &peers); err != nil {
+		return err
+	}
+
+	fmt.Println("\nOnline Peers:")
+	fmt.Println("----------------------------------------")
+	if len(peers) <= 1 {
+		fmt.Println("You are the only peer currently online.")
+	} else {
+		for _, peer := range peers {
+			if peer.PeerID == c.host.ID().String() {
+				continue
+			}
+			fmt.Printf("  Name: %s\n  ID:   %s\n", peer.Name, peer.PeerID)
+			fmt.Print("  Addrs:")
+			addr := peer.Multiaddrs 
+			fmt.Printf(" %s\n", addr[0])
+			fmt.Println("----------------------------------------")
+		}
+	}
+	return nil
+}
+
 func (c *Client) commandLoop() {
 	scanner := bufio.NewScanner(os.Stdin)
 	printClientInstructions()
@@ -156,10 +198,8 @@ func (c *Client) commandLoop() {
 			}
 		case "list":
 			err = c.listFiles()
-
 		case "listpeers":
 			err = c.listPeers()
-
 		case "get":
 			if len(args) != 1 {
 				err = errors.New("usage: get <file_id>")
@@ -246,42 +286,6 @@ func (c *Client) listFiles() error {
 	fmt.Println("--------------------")
 	return nil
 }
-
-
-func (c *Client) listPeers() error {
-	if err := c.encoder.Encode(p2p.Message{Command: "LIST_PEERS"}); err != nil {
-		return err
-	}
-	var resp p2p.Message
-	if err := c.decoder.Decode(&resp); err != nil {
-		return err
-	}
-	if resp.Command != "PEER_LIST_ALL" {
-		return fmt.Errorf("tracker responded with an error: %s", resp.Payload)
-	}
-
-	var peers []db.Peer
-	if err := json.Unmarshal(resp.Payload, &peers); err != nil {
-		return err
-	}
-
-	fmt.Println("\nOnline Peers:")
-	fmt.Println("----------------------------------------")
-	if len(peers) <= 1 {
-		fmt.Println("You are the only peer currently online.")
-	} else {
-		for _, peer := range peers {
-			// Don't list yourself
-			if peer.PeerID == c.host.ID().String() {
-				continue
-			}
-			fmt.Printf("  Name: %s\n  ID:   %s\n", peer.Name, peer.PeerID)
-			fmt.Println("----------------------------------------")
-		}
-	}
-	return nil
-}
-
 
 func (c *Client) get(fileIDStr string) error {
 	fileID, err := uuid.Parse(fileIDStr)

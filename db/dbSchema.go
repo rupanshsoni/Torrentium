@@ -7,14 +7,13 @@ import (
 )
 
 type Peer struct {
-	ID         uuid.UUID  `db:"id"`
-	PeerID     string     `db:"peer_id"`
-	Name       string     `db:"name"`
-	IPAddress  string     `db:"ip_address"` // INET type in DB; handled as string in Go
-	IsOnline   bool       `db:"is_online"`
-	Multiaddrs []string   `db:"multiaddrs"` // PostgreSQL TEXT[] 
-	LastSeen   time.Time  `db:"last_seen"`
-	CreatedAt  time.Time  `db:"created_at"`
+	ID         uuid.UUID `db:"id"`
+	PeerID     string    `db:"peer_id"`
+	Name       string    `db:"name"`
+	Multiaddrs []string  `db:"multiaddrs"` 
+	IsOnline   bool      `db:"is_online"`
+	LastSeen   time.Time `db:"last_seen"`
+	CreatedAt  time.Time `db:"created_at"`
 }
 
 

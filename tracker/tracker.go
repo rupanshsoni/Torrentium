@@ -23,15 +23,14 @@ func NewTracker() *Tracker {
 	}
 }
 
-func (t *Tracker) AddPeer(ctx context.Context, peerID, name, ip string) error {
+func (t *Tracker) AddPeer(ctx context.Context, peerID, name string, multiaddrs []string) error {
 	t.peersMux.Lock()
 	t.peers[peerID] = true
 	t.peersMux.Unlock()
 
-	_, err := t.repo.UpsertPeer(ctx, peerID, name, ip)
+	_, err := t.repo.UpsertPeer(ctx, peerID, name, multiaddrs)
 	if err != nil {
 		log.Printf("Failed to upsert peer %s: %v", peerID, err)
-		// Don't remove from in-memory map, as they are connected. DB error is separate.
 		return err
 	}
 	return nil
@@ -58,6 +57,10 @@ func (t *Tracker) ListPeers() []string {
 	return list
 }
 
+func (t *Tracker) GetOnlinePeers(ctx context.Context) ([]db.Peer, error) {
+	return t.repo.FindOnlinePeers(ctx)
+}
+
 func (t *Tracker) GetOnlinePeersForFile(ctx context.Context, fileID uuid.UUID) ([]db.PeerFile, error) {
 	return t.repo.FindOnlineFilePeersByID(ctx, fileID)
 }
@@ -71,15 +74,10 @@ func (t *Tracker) AddFileWithPeer(ctx context.Context, fileHash, filename string
 	if err != nil {
 		return err
 	}
-
 	_, err = t.repo.InsertPeerFile(ctx, peerID, fileID)
 	return err
 }
 
 func (t *Tracker) GetPeerInfoByDBID(ctx context.Context, peerDBID uuid.UUID) (*db.Peer, error) {
-    return t.repo.GetPeerInfoByDBID(ctx, peerDBID)
-}
-
-func (t *Tracker) GetOnlinePeers(ctx context.Context) ([]db.Peer, error) {
-	return t.repo.FindOnlinePeers(ctx)
+	return t.repo.GetPeerInfoByDBID(ctx, peerDBID)
 }
