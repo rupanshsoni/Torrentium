@@ -222,9 +222,9 @@ func (c *Client) commandLoop() {
 			err = c.listPeers()
 		case "get":
 			if len(args) != 1 {
-				err = errors.New("usage: get <file_id>")
+				err = errors.New("usage: get <file_id> <output_path>")
 			} else {
-				err = c.get(args[0], args[1])
+				err = c.get(args[0], "downloaded_"+args[0])
 			}
 		case "exit":
 			return
@@ -254,15 +254,16 @@ func (c *Client) addFile(filePath string) error {
 	if _, err := io.Copy(hasher, file); err != nil {
 		return err
 	}
+	fileHash := fmt.Sprintf("%x", hasher.Sum(nil))
 
-	// Tracker ko bhejne ke liye payload banate hain.
+	// Create the payload to send to the tracker.
 	payload, _ := json.Marshal(p2p.AnnounceFilePayload{
-		FileHash: fmt.Sprintf("%x", hasher.Sum(nil)),
+		FileHash: fileHash,
 		Filename: filepath.Base(filePath),
 		FileSize: info.Size(),
 	})
 
-	//tracker ko annouce file command bhjete hai
+	// Send the ANNOUNCE_FILE command to the tracker.
 	if err := c.encoder.Encode(p2p.Message{Command: "ANNOUNCE_FILE", Payload: payload}); err != nil {
 		return err
 	}
@@ -272,17 +273,24 @@ func (c *Client) addFile(filePath string) error {
 		return err
 	}
 
-	// Tracker se "ACK" (acknowledgement) ka intezar karte hain.
+	// Wait for the "ACK" (acknowledgement) from the tracker.
 	if resp.Command != "ACK" {
 		return fmt.Errorf("tracker responded with error: %s", resp.Payload)
 	}
 
-	// Announce karne ke baad, corresponding .torrent file banate hain
+	// **THE FIX: Store the file information for sharing.**
+	var ackPayload p2p.AnnounceAckPayload
+	if err := json.Unmarshal(resp.Payload, &ackPayload); err != nil {
+		return fmt.Errorf("failed to parse tracker's ACK payload: %w", err)
+	}
+	c.sharingFiles[ackPayload.FileID] = filePath // Add the file to the map.
+
+	// Create the corresponding .torrent file.
 	if err := torrentfile.CreateTorrentFile(filePath); err != nil {
 		log.Printf("Warning: failed to create .torrent file: %v", err)
 	}
 
-	fmt.Printf("File '%s' announced successfully.\n", filepath.Base(filePath))
+	fmt.Printf("File '%s' announced successfully and is ready to be shared.\n", filepath.Base(filePath))
 	return nil
 }
 
