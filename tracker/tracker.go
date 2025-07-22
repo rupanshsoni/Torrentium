@@ -10,7 +10,7 @@ import (
 )
 
 type Tracker struct {
-	peers    map[string]bool // (In-memory map) jo currently connected peers hai unke IDs ko store karta hai.
+	peers    map[string]bool // (In-memory map )jo currently connected peers hai unke IDs ko store karta hai.
 	repo     *db.Repository
 	peersMux sync.RWMutex  // peers map ko concurrency clashes se bachane ke liye reead and write Mutex.
 }
@@ -82,16 +82,19 @@ func (t *Tracker) GetAllFiles(ctx context.Context) ([]db.File, error) {
 
 
 // AddFileWithPeer ek file ko database mein add karta hai aur use ek peer ke saath link kar deta hai.
-func (t *Tracker) AddFileWithPeer(ctx context.Context, fileHash, filename string, fileSize int64, peerID string) error {
-	//pehle file ko files mein store kiya
+func (t *Tracker) AddFileWithPeer(ctx context.Context, fileHash, filename string, fileSize int64, peerID string) (uuid.UUID, error) {
+	// Pehle file ko `files` table mein insert karte hain (ya agar exist karti hai to ID get karte hain).
 	fileID, err := t.repo.InsertFile(ctx, fileHash, filename, fileSize, "")
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
-	
-	//fir peer_files mein store kiya with a peer associated
+	// Fir `peer_files` table mein entry banakar file aur peer ko link karte hain.
 	_, err = t.repo.InsertPeerFile(ctx, peerID, fileID)
-	return err
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	return fileID, nil
 }
 
 

@@ -51,6 +51,13 @@ type GetPeerInfoPayload struct {
 }
 
 
+//yeh struct fileID send karta hai acknowledge message ke saath
+type AnnounceAckPayload struct {
+	FileID uuid.UUID `json:"file_id"`
+}
+
+
+
 // RegisterTrackerProtocol function host par ek stream handler set karta hai.
 // Jab bhi koi peer TrackerProtocolID ka use karke connect karta hai, toh yeh handler trigger hota hai.
 func RegisterTrackerProtocol(h host.Host, t *tracker.Tracker) {
@@ -120,13 +127,15 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 				response.Command = "ERROR"
 			} else {
 				//announcedd filee ko database mein peer ke saath link karte hai
-				err := t.AddFileWithPeer(ctx, p.FileHash, p.Filename, p.FileSize, remotePeerID)
+				fileID, err := t.AddFileWithPeer(ctx, p.FileHash, p.Filename, p.FileSize, remotePeerID)
 				if err != nil {
 					log.Printf("ERROR in ANNOUNCE_FILE (db): %v", err)
 					response.Command = "ERROR"
 				} else {
 					//ACK - ackowleddgment hai yha
 					response.Command = "ACK"
+					ackPayload := AnnounceAckPayload{FileID: fileID}
+					response.Payload, _ = json.Marshal(ackPayload)
 				}
 			}
 

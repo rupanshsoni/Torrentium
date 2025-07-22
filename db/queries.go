@@ -2,11 +2,14 @@ package db
 
 import (
 	"context"
+
+	"errors"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -98,22 +101,27 @@ func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID uuid.UUID) 
 	return &peer, nil
 }
 
+
+
 // File ko DB mein insert karta hai (hash, size, type etc. ke saath)
 // Aur agar file peehle se exit kar rhi hai toh name update kar dega (hash compare karne ke baad)
 func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, fileSize int64, contentType string) (uuid.UUID, error) {
 	var fileID uuid.UUID
-	query := `
-        INSERT INTO files (file_hash, filename, file_size, content_type, created_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (file_hash) DO UPDATE SET filename = $2
-        RETURNING id
-    `
-	err := r.DB.QueryRow(ctx, query, fileHash, filename, fileSize, contentType, time.Now()).Scan(&fileID)
-	if err != nil {
-		return uuid.Nil, err
+	err := r.DB.QueryRow(ctx, `SELECT id FROM files WHERE file_hash = $1`, fileHash).Scan(&fileID)
+	if err == nil {
+		return fileID, nil // File exists
 	}
-	return fileID, nil
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err 
+	}
+
+	// File does not exist, insert it and return the new ID.
+	err = r.DB.QueryRow(ctx,
+		`INSERT INTO files (file_hash, filename, file_size, content_type, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		fileHash, filename, fileSize, contentType, time.Now()).Scan(&fileID)
+	return fileID, err
 }
+
 
 // Tracker par available saari files ka list deta hai
 func (r *Repository) FindAllFiles(ctx context.Context) ([]File, error) {

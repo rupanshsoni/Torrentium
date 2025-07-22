@@ -46,6 +46,7 @@ type Client struct {
 	peerName      string
 	webRTCPeers   map[peer.ID]*torrentiumWebRTC.WebRTCPeer // Active WebRTC connections ka map
 	peersMux      sync.RWMutex
+	sharingFiles map[uuid.UUID]string
 }
 
 // entry point for the webRTC peer code
@@ -90,9 +91,9 @@ func NewClient(h host.Host) *Client {
 	return &Client{
 		host:        h,
 		webRTCPeers: make(map[peer.ID]*torrentiumWebRTC.WebRTCPeer),
+		sharingFiles: make(map[uuid.UUID]string),
 	}
 }
-
 
 
 // yeh function trackerr se connection bnata hai aur handshake perform karta hai
@@ -223,7 +224,7 @@ func (c *Client) commandLoop() {
 			if len(args) != 1 {
 				err = errors.New("usage: get <file_id>")
 			} else {
-				err = c.get(args[0])
+				err = c.get(args[0], args[1])
 			}
 		case "exit":
 			return
@@ -321,7 +322,7 @@ func (c *Client) listFiles() error {
 
 
 // get function ek file ko download karne ka process shuru karta hai.
-func (c *Client) get(fileIDStr string) error {
+func (c *Client) get(fileIDStr string, outputPath string) error {
 
 	// pehle, fileID parse karte hai to loacate and identify the file
 	fileID, err := uuid.Parse(fileIDStr)
@@ -390,9 +391,9 @@ func (c *Client) get(fileIDStr string) error {
 	if len(peerInfo.Multiaddrs) == 0 {
 		return fmt.Errorf("peer %s has no listed multiaddrs", targetPeerID)
 	}
-	maddr, err := multiaddr.NewMultiaddr(peerInfo.Multiaddrs[1])
+	maddr, err := multiaddr.NewMultiaddr(peerInfo.Multiaddrs[0])
 	if err != nil {
-		return fmt.Errorf("could not parse peer's multiaddress '%s': %w", peerInfo.Multiaddrs[1], err)
+		return fmt.Errorf("could not parse peer's multiaddress '%s': %w", peerInfo.Multiaddrs[0], err)
 	}
 
 	// This is the crucial step that prevents the "no addresses" error.
@@ -407,6 +408,13 @@ func (c *Client) get(fileIDStr string) error {
 	}
 	c.addWebRTCPeer(targetPeerID, webRTCPeer)
 	log.Println("WebRTC connection established")
+
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		webRTCPeer.Close()
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	webRTCPeer.SetFileWriter(outputFile)
 
 	//file download request send karenge over the established data channel
 	log.Printf("Requesting file %s from peer...", fileID)
@@ -501,13 +509,37 @@ func (c *Client) handleWebRTCOffer(offer, remotePeerIDStr string, s network.Stre
 
 // WebRTC data channel par aaye messages ko process karta hai
 func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, p *torrentiumWebRTC.WebRTCPeer) {
-
-	//agar message string hai toh use log karte hai
+	
 	if msg.IsString {
-		log.Printf("Received message: %s\n", string(msg.Data))
-	} else {
+		var message map[string]string
+		if err := json.Unmarshal(msg.Data, &message); err != nil {
+			log.Printf("Received un-parseable message: %s", string(msg.Data))
+			return
+		}
 
-		//agar message binaryhai toh usse filee mein write karte hai
+		if cmd, ok := message["command"]; ok && cmd == "REQUEST_FILE" {
+			fileIDStr, hasFileID := message["file_id"]
+			if !hasFileID {
+				log.Println("Received file request without a file_id.")
+				return
+			}
+			fileID, err := uuid.Parse(fileIDStr)
+			if err != nil {
+				log.Printf("Received file request with invalid file ID: %s", fileIDStr)
+				return
+			}
+			// Start sending the file in a new concurrent routine.
+			go c.sendFile(p, fileID)
+		} else if status, ok := message["status"]; ok && status == "TRANSFER_COMPLETE" {
+			log.Println("File transfer complete!")
+			if writer := p.GetFileWriter(); writer != nil {
+				writer.Close() // Close the output file.
+			}
+			p.Close() // Close the WebRTC connection.
+		}
+
+	} else {
+		// This is the downloader receiving file chunks.
 		if writer := p.GetFileWriter(); writer != nil {
 			if _, err := writer.Write(msg.Data); err != nil {
 				log.Printf("Error writing file chunk: %v", err)
@@ -518,6 +550,45 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, p *torrenti
 	}
 }
 
+
+func (c *Client) sendFile(p *torrentiumWebRTC.WebRTCPeer, fileID uuid.UUID) {
+	log.Printf("Processing request to send file with ID: %s", fileID)
+
+	filePath, ok := c.sharingFiles[fileID]
+	if !ok {
+		log.Printf("Error: Received request for file ID %s, but I am not sharing it.", fileID)
+		p.Send(map[string]string{"error": "File not found"})
+		return
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Printf("Error opening file %s to send: %v", filePath, err)
+		p.Send(map[string]string{"error": "Could not open file"})
+		return
+	}
+	defer file.Close()
+
+	log.Printf("Starting file transfer for %s", filepath.Base(filePath))
+	buffer := make([]byte, 16*1024) // 16KB chunks
+	for {
+		bytesRead, err := file.Read(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break // End of file
+			}
+			log.Printf("Error reading file chunk: %v", err)
+			return
+		}
+		if err := p.SendRaw(buffer[:bytesRead]); err != nil {
+			log.Printf("Error sending file chunk: %v", err)
+			return
+		}
+	}
+	log.Printf("Finished sending file %s", filepath.Base(filePath))
+	// Send a "transfer complete" message so the receiver can clean up.
+	p.Send(map[string]string{"status": "TRANSFER_COMPLETE"})
+}
 
 
 // ek naye WebRTC peer ko thread-safe tarike se map mein add karta hai (race condition avoid karne ke liye)
