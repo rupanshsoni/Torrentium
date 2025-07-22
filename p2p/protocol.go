@@ -1,4 +1,3 @@
-// p2p/protocol.go
 package p2p
 
 import (
@@ -6,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+
 	// "torrentium/db"
 	"torrentium/tracker"
 
@@ -14,35 +14,45 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 )
 
+// TrackerProtocolID ek unique string hai jo tracker ko network par pehchanta hai.
+// Isse peers ko pata chalta hai ki woh sahi tracker se baat kar rahe hain.
 const TrackerProtocolID = "/torrentium/tracker/1.0"
 
+
+//yeh struct tracker aur peer ke beech ke messaging ko define kar rha hai
 type Message struct {
-	Command string          `json:"command"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Command string          `json:"command"`  // name of command jaise : ADD_PEER
+	Payload json.RawMessage `json:"payload,omitempty"` // according to command, payload mein data hai
 }
 
-// New HandshakePayload struct
+// yeh struct peer ke tracker ya kisi au peer ke saath handshake ko define karta hai
 type HandshakePayload struct {
 	Name        string   `json:"name"`
 	ListenAddrs []string `json:"listen_addrs"`
 }
 
-// ... other payload structs remain the same
+
+// AnnounceFilePayload struct tab use hota hai jab peer announce karta hai tracker ko ki uske paas ek nayi file hai.
 type AnnounceFilePayload struct {
 	FileHash string `json:"file_hash"`
 	Filename string `json:"filename"`
 	FileSize int64  `json:"file_size"`
 }
 
+// GetPeersPayload struct tab use hota hai jab peer ek specific file ke liye dusre peers ki list mangta hai.
 type GetPeersPayload struct {
-	FileID uuid.UUID `json:"file_id"`
+	FileID uuid.UUID `json:"file_id"`  // file ka DB id jiske liye peeers chahiye
 }
 
+
+//yeh struct tab use hota hai jab kisi specific peer ki info chahiye(like yeh file kiske paas hai)
 type GetPeerInfoPayload struct {
 	PeerDBID uuid.UUID `json:"peer_db_id"`
 }
 
 
+// RegisterTrackerProtocol function host par ek stream handler set karta hai.
+// Jab bhi koi peer TrackerProtocolID ka use karke connect karta hai, toh yeh handler trigger hota hai.
 func RegisterTrackerProtocol(h host.Host, t *tracker.Tracker) {
 	h.SetStreamHandler(TrackerProtocolID, func(s network.Stream) {
 		log.Printf("New peer connected: %s", s.Conn().RemotePeer())
@@ -58,12 +68,14 @@ func RegisterTrackerProtocol(h host.Host, t *tracker.Tracker) {
 	})
 }
 
+
+// yeh function kisi indivisual peer ki stream se aaye hue messages handle karta gau
 func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) error {
 	decoder := json.NewDecoder(s)
 	encoder := json.NewEncoder(s)
 	remotePeerID := s.Conn().RemotePeer().String()
 
-	// Updated Handshake
+	// first, peer se ek HANDSHAKE expect karte hai
 	var nameMsg Message
 	if err := decoder.Decode(&nameMsg); err != nil {
 		return err
@@ -72,20 +84,25 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Expected HANDSHAKE command"`)})
 	}
 
+	// Handshake payload ko parse karte hain
 	var handshake HandshakePayload
 	if err := json.Unmarshal(nameMsg.Payload, &handshake); err != nil || handshake.Name == "" {
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Invalid handshake payload"`)})
 	}
 
+
+	//yeh peer ko tracker aur database dono mein store karta hai
 	if err := t.AddPeer(ctx, remotePeerID, handshake.Name, handshake.ListenAddrs); err != nil {
 		log.Printf("CRITICAL: Failed to AddPeer to database: %v", err)
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Failed to register with tracker"`)})
 	}
 
-	welcomePayload, _ := json.Marshal(t.ListPeers())
-	encoder.Encode(Message{Command: "WELCOME", Payload: welcomePayload})
 
-	// ... command loop remains the same
+	// Handshake success hone par, welcome message bhejte hain jisme online peers ki list hoti hai.
+	welcomePayload, _ := json.Marshal(t.ListPeers())
+	encoder.Encode(Message{Command: "Tracker Connection Established", Payload: welcomePayload})
+
+	//yeh loop peer se commands ka wait kaeta hai, aur accordingly react karta hai 
 	for {
 		var msg Message
 		if err := decoder.Decode(&msg); err != nil {
@@ -102,15 +119,18 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 				log.Printf("ERROR in ANNOUNCE_FILE (unmarshal): %v", err)
 				response.Command = "ERROR"
 			} else {
+				//announcedd filee ko database mein peer ke saath link karte hai
 				err := t.AddFileWithPeer(ctx, p.FileHash, p.Filename, p.FileSize, remotePeerID)
 				if err != nil {
 					log.Printf("ERROR in ANNOUNCE_FILE (db): %v", err)
 					response.Command = "ERROR"
 				} else {
+					//ACK - ackowleddgment hai yha
 					response.Command = "ACK"
 				}
 			}
 
+		//agar peer ne saari announced/available files ki list maangi hai
 		case "LIST_FILES":
 			files, err := t.GetAllFiles(ctx)
 			if err != nil {
@@ -121,6 +141,7 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 				response.Payload, _ = json.Marshal(files)
 			}
 
+		//peer ne ek specif file ke liye peers ki list maangi hai
 		case "GET_PEERS_FOR_FILE":
 			var p GetPeersPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
@@ -137,6 +158,7 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 				}
 			}
 
+		//peer ne kisi specific peer ki info maangi hai
 		case "GET_PEER_INFO":
 			var p GetPeerInfoPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
@@ -153,6 +175,7 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 				}
 			}
 
+		//peer ne sabhi online peers ki list maangi hai
 		case "LIST_PEERS":
 			peers, err := t.GetOnlinePeers(ctx)
 			if err != nil {
@@ -168,6 +191,7 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 			response.Payload, _ = json.Marshal("Unknown command")
 		}
 
+		//response ko encode karke peer ko bhjete hai
 		if err := encoder.Encode(response); err != nil {
 			return err
 		}

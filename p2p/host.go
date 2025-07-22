@@ -1,4 +1,3 @@
-// p2p/host.go
 package p2p
 
 import (
@@ -15,8 +14,12 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
+// privKeyFile constant hamari private key file ka naam store karta hai.
+//iss private key se ek unique peerID attch ho jaegi, this solves our reusability of our node
 const privKeyFile = "private_key"
 
+// newHost func ek naya libp2p host bnata hai
+// Yeh private key load ya generate karta hai aur provided address par listen karta hai.
 func NewHost(ctx context.Context, listenAddr string) (host.Host, error) {
 	priv, err := loadOrGeneratePrivateKey()
 	if err != nil {
@@ -29,6 +32,7 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, error) {
 	}
 
 	h, err := libp2p.New(
+		//private key se host ki identity in the network create ho rhi hai
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
 	)
@@ -47,6 +51,8 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, error) {
 	return h, nil
 }
 
+// loadOrGeneratePrivateKey function file se private key load karta hai.
+// Agar private key already present nhi hai toh yeh ek new file generate karta hai
 func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
 	privBytes, err := os.ReadFile(privKeyFile)
 	if os.IsNotExist(err) {
@@ -60,6 +66,7 @@ func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
 			return nil, err
 		}
 
+		//permissions 0600 - sirf owner hi read/write kar sakta hai
 		if err := os.WriteFile(privKeyFile, privBytes, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write private key to file: %w", err)
 		}
@@ -72,3 +79,7 @@ func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
 	log.Println("Loaded existing libp2p private key.")
 	return crypto.UnmarshalPrivateKey(privBytes)
 }
+
+//Basically Libp2p uses this private key to generate a unique Peer ID. 
+// This ID is derived from the public key and serves as the node's permanent 
+// and verifiable address on the network

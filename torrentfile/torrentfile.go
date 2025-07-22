@@ -1,4 +1,3 @@
-// torrentfile/torrentfile.go
 package torrentfile
 
 import (
@@ -11,6 +10,7 @@ import (
 	bencode "github.com/jackpal/bencode-go"
 )
 
+//yeh struct .torrentl file ka metadata define karta hai.Bencode format mein encode hota hai.
 type TorrentMeta struct {
 	Filename  string    `bencode:"filename"`
 	Length    int64     `bencode:"length"`
@@ -18,6 +18,9 @@ type TorrentMeta struct {
 	CreatedAt time.Time `bencode:"created_at"`
 }
 
+
+// CreateTorrentFile function di gayi file ke liye ek .torrent file banata hai.
+// Yeh file ka metadata (naam, size, hash) collect karta hai aur use bencode format mein save karta hai.
 func CreateTorrentFile(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -25,6 +28,7 @@ func CreateTorrentFile(filename string) error {
 	}
 	defer file.Close()
 
+	//file ka data fetch kara hai yha
 	info, err := file.Stat()
 	if err != nil {
 		return err
@@ -34,6 +38,7 @@ func CreateTorrentFile(filename string) error {
 	if _, err = io.Copy(hashCalc, file); err != nil {
 		return err
 	}
+	//hexadecimal string mein convert kardiya hash ko
 	hexHash := hex.EncodeToString(hashCalc.Sum(nil))
 
 	meta := TorrentMeta{
@@ -50,5 +55,6 @@ func CreateTorrentFile(filename string) error {
 	}
 	defer out.Close()
 
+	// Metadata struct ko bencode format mein encode karke output file mein likhte hain.
 	return bencode.Marshal(out, meta)
 }

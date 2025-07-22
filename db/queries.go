@@ -1,4 +1,3 @@
-// db/queries.go
 package db
 
 import (
@@ -11,14 +10,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+//repository struct mein saare DB operations hai
 type Repository struct {
 	DB *pgxpool.Pool
 }
 
+//ek naya repo bna rha hai (say for a new user)
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{DB: db}
 }
 
+
+// yeh combined function hai insert + update = upsert (insert new peer and update if already exists)
 func (r *Repository) UpsertPeer(ctx context.Context, peerID, name string, multiaddrs []string) (uuid.UUID, error) {
 	now := time.Now()
 	var peerUUID uuid.UUID
@@ -47,6 +50,8 @@ func (r *Repository) UpsertPeer(ctx context.Context, peerID, name string, multia
 	return peerUUID, nil
 }
 
+
+//currently online peers ko return karta hai
 func (r *Repository) FindOnlinePeers(ctx context.Context) ([]Peer, error) {
 	query := `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE is_online = true`
 	rows, err := r.DB.Query(ctx, query)
@@ -66,10 +71,7 @@ func (r *Repository) FindOnlinePeers(ctx context.Context) ([]Peer, error) {
 	return peers, rows.Err()
 }
 
-// ... all other functions (SetPeerOffline, MarkAllPeersOffline, etc.) remain the same ...
-// Note: GetPeerInfoByDBID was removed as it's now redundant with FindOnlinePeers and more specific queries.
-// If you need it, it would be updated similarly to FindOnlinePeers.
-
+// Jab koi peer disconnect kare, use offline mark karne ke liye
 func (r *Repository) SetPeerOffline(ctx context.Context, peerID string) error {
 	now := time.Now()
 	_, err := r.DB.Exec(ctx,
@@ -78,11 +80,15 @@ func (r *Repository) SetPeerOffline(ctx context.Context, peerID string) error {
 	return err
 }
 
+// Server start hone par sab peers ko offline mark karta hai 
+// tracker ko jab host karenge aur restart karna pada toh saare peeer disconnect ho jaenge aur offline mark ho jaenge
 func (r *Repository) MarkAllPeersOffline(ctx context.Context) error {
 	_, err := r.DB.Exec(ctx, `UPDATE peers SET is_online=false WHERE is_online=true`)
 	return err
 }
 
+
+// Peer ki full info return karta hai DB ID ke basis par
 func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID uuid.UUID) (*Peer, error) {
 	var peer Peer
 	err := r.DB.QueryRow(ctx, `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE id = $1`, peerDBID).Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt)
@@ -92,6 +98,8 @@ func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID uuid.UUID) 
 	return &peer, nil
 }
 
+// File ko DB mein insert karta hai (hash, size, type etc. ke saath)
+// Aur agar file peehle se exit kar rhi hai toh name update kar dega (hash compare karne ke baad)
 func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, fileSize int64, contentType string) (uuid.UUID, error) {
 	var fileID uuid.UUID
 	query := `
@@ -107,6 +115,7 @@ func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, 
 	return fileID, nil
 }
 
+// Tracker par available saari files ka list deta hai
 func (r *Repository) FindAllFiles(ctx context.Context) ([]File, error) {
 	query := `SELECT id, file_hash, filename, file_size, content_type, created_at FROM files ORDER BY created_at DESC`
 	rows, err := r.DB.Query(ctx, query)
@@ -126,6 +135,9 @@ func (r *Repository) FindAllFiles(ctx context.Context) ([]File, error) {
 	return files, rows.Err()
 }
 
+
+//peer ki chosen file tracker pe register karta hai
+//peer_id + file_id ka combination unique relation store hota hai
 func (r *Repository) InsertPeerFile(ctx context.Context, peerLibp2pID string, fileID uuid.UUID) (uuid.UUID, error) {
 	var peerUUID uuid.UUID
 	err := r.DB.QueryRow(ctx, `SELECT id FROM peers WHERE peer_id = $1`, peerLibp2pID).Scan(&peerUUID)
@@ -148,6 +160,7 @@ func (r *Repository) InsertPeerFile(ctx context.Context, peerLibp2pID string, fi
 	return peerFileID, err
 }
 
+// Kisi file ke liye saare online peers dikhata hai (abhi ke liye basic trust score dikhata hai)
 func (r *Repository) FindOnlineFilePeersByID(ctx context.Context, fileID uuid.UUID) ([]PeerFile, error) {
 	query := `
         SELECT pf.id, pf.file_id, pf.peer_id, pf.announced_at, COALESCE(ts.score, 0.5) as score

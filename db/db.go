@@ -1,4 +1,3 @@
-// db/db.go
 package db
 
 import (
@@ -11,6 +10,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// DB ek global variable hai jo database connection pool ko hold karta hai.
 var DB *pgxpool.Pool
 
 func InitDB() {
@@ -33,11 +33,13 @@ func InitDB() {
 
 	ctx := context.Background()
 	var err error
+	// pgxpool ka use karke naya connection pool banate hain.
 	DB, err = pgxpool.New(ctx, dbURL)
 	if err != nil {
 		log.Fatalf("Error creating DB pool: %v\n", err)
 	}
 
+	// Database ko ping karke connection check karte hain.
 	if err = DB.Ping(ctx); err != nil {
 		log.Fatalf("Error connecting to DB: %v\n", err)
 	}
