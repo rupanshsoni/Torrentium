@@ -15,7 +15,7 @@ type TorrentMeta struct {
 	Filename  string    `bencode:"filename"`
 	Length    int64     `bencode:"length"`
 	Hash      string    `bencode:"hash"`
-	CreatedAt time.Time `bencode:"created_at"`
+	CreatedAt int64 `bencode:"created_at"`
 }
 
 
@@ -45,7 +45,7 @@ func CreateTorrentFile(filename string) error {
 		Filename:  info.Name(),
 		Length:    info.Size(),
 		Hash:      hexHash,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().Unix(),
 	}
 
 	outputName := filename + ".torrent"

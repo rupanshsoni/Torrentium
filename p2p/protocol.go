@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 
@@ -18,10 +19,9 @@ import (
 // Isse peers ko pata chalta hai ki woh sahi tracker se baat kar rahe hain.
 const TrackerProtocolID = "/torrentium/tracker/1.0"
 
-
-//yeh struct tracker aur peer ke beech ke messaging ko define kar rha hai
+// yeh struct tracker aur peer ke beech ke messaging ko define kar rha hai
 type Message struct {
-	Command string          `json:"command"`  // name of command jaise : ADD_PEER
+	Command string          `json:"command"`           // name of command jaise : ADD_PEER
 	Payload json.RawMessage `json:"payload,omitempty"` // according to command, payload mein data hai
 }
 
@@ -30,7 +30,6 @@ type HandshakePayload struct {
 	Name        string   `json:"name"`
 	ListenAddrs []string `json:"listen_addrs"`
 }
-
 
 // AnnounceFilePayload struct tab use hota hai jab peer announce karta hai tracker ko ki uske paas ek nayi file hai.
 type AnnounceFilePayload struct {
@@ -41,22 +40,18 @@ type AnnounceFilePayload struct {
 
 // GetPeersPayload struct tab use hota hai jab peer ek specific file ke liye dusre peers ki list mangta hai.
 type GetPeersPayload struct {
-	FileID uuid.UUID `json:"file_id"`  // file ka DB id jiske liye peeers chahiye
+	FileID uuid.UUID `json:"file_id"` // file ka DB id jiske liye peeers chahiye
 }
 
-
-//yeh struct tab use hota hai jab kisi specific peer ki info chahiye(like yeh file kiske paas hai)
+// yeh struct tab use hota hai jab kisi specific peer ki info chahiye(like yeh file kiske paas hai)
 type GetPeerInfoPayload struct {
 	PeerDBID uuid.UUID `json:"peer_db_id"`
 }
 
-
-//yeh struct fileID send karta hai acknowledge message ke saath
+// yeh struct fileID send karta hai acknowledge message ke saath
 type AnnounceAckPayload struct {
 	FileID uuid.UUID `json:"file_id"`
 }
-
-
 
 // RegisterTrackerProtocol function host par ek stream handler set karta hai.
 // Jab bhi koi peer TrackerProtocolID ka use karke connect karta hai, toh yeh handler trigger hota hai.
@@ -74,7 +69,6 @@ func RegisterTrackerProtocol(h host.Host, t *tracker.Tracker) {
 		}
 	})
 }
-
 
 // yeh function kisi indivisual peer ki stream se aaye hue messages handle karta gau
 func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) error {
@@ -97,19 +91,17 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Invalid handshake payload"`)})
 	}
 
-
 	//yeh peer ko tracker aur database dono mein store karta hai
 	if err := t.AddPeer(ctx, remotePeerID, handshake.Name, handshake.ListenAddrs); err != nil {
 		log.Printf("CRITICAL: Failed to AddPeer to database: %v", err)
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Failed to register with tracker"`)})
 	}
 
-
 	// Handshake success hone par, welcome message bhejte hain jisme online peers ki list hoti hai.
 	welcomePayload, _ := json.Marshal(t.ListPeers())
 	encoder.Encode(Message{Command: "Tracker Connection Established", Payload: welcomePayload})
 
-	//yeh loop peer se commands ka wait kaeta hai, aur accordingly react karta hai 
+	//yeh loop peer se commands ka wait kaeta hai, aur accordingly react karta hai
 	for {
 		var msg Message
 		if err := decoder.Decode(&msg); err != nil {
@@ -125,12 +117,14 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
 				log.Printf("ERROR in ANNOUNCE_FILE (unmarshal): %v", err)
 				response.Command = "ERROR"
+				response.Payload = json.RawMessage(fmt.Sprintf(`"%s"`, err.Error()))
 			} else {
 				//announcedd filee ko database mein peer ke saath link karte hai
 				fileID, err := t.AddFileWithPeer(ctx, p.FileHash, p.Filename, p.FileSize, remotePeerID)
 				if err != nil {
 					log.Printf("ERROR in ANNOUNCE_FILE (db): %v", err)
 					response.Command = "ERROR"
+					response.Payload = json.RawMessage(fmt.Sprintf(`"%s"`, err.Error()))
 				} else {
 					//ACK - ackowleddgment hai yha
 					response.Command = "ACK"
