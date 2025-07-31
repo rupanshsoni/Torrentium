@@ -152,20 +152,26 @@ func (r *Repository) InsertPeerFile(ctx context.Context, peerLibp2pID string, fi
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to find peer with peer_id=%s: %w", peerLibp2pID, err)
 	}
-
 	var peerFileID uuid.UUID
+	// insert a new file or pehle se exist kar rhi hai toh woh fetch karta hai.
 	query := `
-        INSERT INTO peer_files (peer_id, file_id, announced_at)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (peer_id, file_id) DO NOTHING
-        RETURNING id
+        WITH ins AS (
+            INSERT INTO peer_files (peer_id, file_id, announced_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (peer_id, file_id) DO NOTHING
+            RETURNING id
+        )
+        SELECT id FROM ins
+        UNION ALL
+        SELECT id FROM peer_files WHERE peer_id = $1 AND file_id = $2 AND NOT EXISTS (SELECT 1 FROM ins)
     `
 	err = r.DB.QueryRow(ctx, query, peerUUID, fileID, time.Now()).Scan(&peerFileID)
-	if err != nil && err.Error() == "no rows in result set" {
-		err = r.DB.QueryRow(ctx, `SELECT id FROM peer_files WHERE peer_id = $1 AND file_id = $2`, peerUUID, fileID).Scan(&peerFileID)
+	if err != nil {
+		log.Printf("[Repository] InsertPeerFile error for peerUUID %s and fileID %s: %v", peerUUID, fileID, err)
+		return uuid.Nil, err
 	}
 
-	return peerFileID, err
+	return peerFileID, nil
 }
 
 // Kisi file ke liye saare online peers dikhata hai (abhi ke liye basic trust score dikhata hai)
