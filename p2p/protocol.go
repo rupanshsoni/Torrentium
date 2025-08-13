@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 
-	// "torrentium/db"
 	"torrentium/tracker"
 
 	"github.com/google/uuid"
@@ -29,6 +28,7 @@ type Message struct {
 type HandshakePayload struct {
 	Name        string   `json:"name"`
 	ListenAddrs []string `json:"listen_addrs"`
+	PeerID      string   `json:"peer_id"`
 }
 
 // AnnounceFilePayload struct tab use hota hai jab peer announce karta hai tracker ko ki uske paas ek nayi file hai.
@@ -36,6 +36,12 @@ type AnnounceFilePayload struct {
 	FileHash string `json:"file_hash"`
 	Filename string `json:"filename"`
 	FileSize int64  `json:"file_size"`
+	PeerID   string `json:"peer_id"`
+}
+
+// AnnounceAckPayload struct tracker se peer ko file announce karne par acknowledgement bhejne ke liye use hota hai.
+type AnnounceAckPayload struct {
+	FileID uuid.UUID `json:"file_id"`
 }
 
 // GetPeersPayload struct tab use hota hai jab peer ek specific file ke liye dusre peers ki list mangta hai.
@@ -48,9 +54,26 @@ type GetPeerInfoPayload struct {
 	PeerDBID uuid.UUID `json:"peer_db_id"`
 }
 
-// yeh struct fileID send karta hai acknowledge message ke saath
-type AnnounceAckPayload struct {
-	FileID uuid.UUID `json:"file_id"`
+// RequestFilePayload struct file request ke liye use hota hai
+type RequestFilePayload struct {
+	FileID          uuid.UUID `json:"file_id"`
+	RequesterPeerID string    `json:"requester_peer_id"`
+}
+
+// FileTransferPayload struct file chunks transfer ke liye use hota hai
+type FileTransferPayload struct {
+	FileID     uuid.UUID `json:"file_id"`
+	ChunkIndex int       `json:"chunk_index"`
+	ChunkData  []byte    `json:"chunk_data"`
+	IsLast     bool      `json:"is_last"`
+	TotalSize  int64     `json:"total_size,omitempty"`
+	Filename   string    `json:"filename,omitempty"`
+}
+
+// ConnectToPeerPayload struct direct peer connection ke liye use hota hai
+type ConnectToPeerPayload struct {
+	PeerID string `json:"peer_id"`
+	Port   int    `json:"port"` // WebSocket server port
 }
 
 // RegisterTrackerProtocol function host par ek stream handler set karta hai.
@@ -60,7 +83,7 @@ func RegisterTrackerProtocol(h host.Host, t *tracker.Tracker) {
 		log.Printf("New peer connected: %s", s.Conn().RemotePeer())
 		ctx := context.Background()
 		defer s.Close()
-		defer t.RemovePeer(ctx, s.Conn().RemotePeer().String())
+		defer t.RemovePeerWithContext(ctx, s.Conn().RemotePeer().String())
 
 		if err := handleStream(ctx, s, t); err != nil {
 			if err != io.EOF {
@@ -92,8 +115,8 @@ func handleStream(ctx context.Context, s network.Stream, t *tracker.Tracker) err
 	}
 
 	//yeh peer ko tracker aur database dono mein store karta hai
-	if err := t.AddPeer(ctx, remotePeerID, handshake.Name, handshake.ListenAddrs); err != nil {
-		log.Printf("CRITICAL: Failed to AddPeer to database: %v", err)
+	if err := t.AddPeerWithContext(ctx, remotePeerID, handshake.Name, handshake.ListenAddrs); err != nil {
+		log.Printf("CRITIC: failed to AddPeer to database: %v", err)
 		return encoder.Encode(Message{Command: "ERROR", Payload: json.RawMessage(`"Failed to register with tracker"`)})
 	}
 

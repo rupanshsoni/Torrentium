@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,7 +77,48 @@ func (r *Repository) UpsertPeer(ctx context.Context, peerID, name string, multia
 	}
 
 	// If everything succeeded, commit the transaction and return the peer's UUID.
-	return peerUUID, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return peerUUID, nil
+}
+
+// FindPeersByIDs returns peer details for specific peer IDs
+func (r *Repository) FindPeersByIDs(ctx context.Context, peerIDs []string) ([]Peer, error) {
+	if len(peerIDs) == 0 {
+		return []Peer{}, nil
+	}
+
+	// Create placeholder string for the IN clause
+	placeholders := make([]string, len(peerIDs))
+	args := make([]interface{}, len(peerIDs))
+	for i, peerID := range peerIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = peerID
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at 
+		FROM peers 
+		WHERE peer_id IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	rows, err := r.DB.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var peers []Peer
+	for rows.Next() {
+		var peer Peer
+		if err := rows.Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt); err != nil {
+			return nil, err
+		}
+		peers = append(peers, peer)
+	}
+
+	return peers, nil
 }
 
 // currently online peers ko return karta hai
@@ -138,9 +180,13 @@ func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, 
 	}
 
 	// File does not exist, insert it and return the new ID.
+	var contentTypePtr *string
+	if contentType != "" {
+		contentTypePtr = &contentType
+	}
 	err = r.DB.QueryRow(ctx,
 		`INSERT INTO files (file_hash, filename, file_size, content_type, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		fileHash, filename, fileSize, contentType, time.Now()).Scan(&fileID)
+		fileHash, filename, fileSize, contentTypePtr, time.Now()).Scan(&fileID)
 	return fileID, err
 }
 

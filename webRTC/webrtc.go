@@ -13,27 +13,40 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-//data channel pe aane wale messages ko handle karta hai
+// data channel pe aane wale messages ko handle karta hai
 type DataChannelMessageHandler func(webrtc.DataChannelMessage, *WebRTCPeer)
 
-
-//yeh struct ek webRTC connection aur related state ko show karta hai
+// yeh struct ek webRTC connection aur related state ko show karta hai
 type WebRTCPeer struct {
 	pc              *webrtc.PeerConnection
 	dataChannel     *webrtc.DataChannel
 	onMessage       DataChannelMessageHandler
 	fileWriter      io.WriteCloser
 	state           webrtc.PeerConnectionState
-	connectedSignal chan struct{}			// Jab connection successfully ban jata hai to yeh channel close ho jata hai
-	mu              sync.RWMutex			//concurrent access se protect karne ke liye
+	connectedSignal chan struct{} // Jab connection successfully ban jata hai to yeh channel close ho jata hai
+	mu              sync.RWMutex  //concurrent access se protect karne ke liye
 	signalingStream network.Stream
 }
 
-
-//ek naya webRTC peer bnata hai
+// ek naya webRTC peer bnata hai
 func NewWebRTCPeer(onMessage DataChannelMessageHandler) (*WebRTCPeer, error) {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
+			// Cloudflare STUN (free)
+			{URLs: []string{"stun:stun.cloudflare.com:3478"}},
+
+			// Metered.ca Open Relay (free 20GB/month, runs on ports 80/443)
+			{
+				URLs: []string{
+					"turn:openrelay.metered.ca:80",
+					"turn:openrelay.metered.ca:443",
+					"turns:openrelay.metered.ca:443",
+				},
+				Username:   "openrelayproject",
+				Credential: "openrelayproject",
+			},
+
+			// Backup STUN servers
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
 		},
 	}
@@ -60,7 +73,7 @@ func NewWebRTCPeer(onMessage DataChannelMessageHandler) (*WebRTCPeer, error) {
 
 func (p *WebRTCPeer) handleConnectionStateChange(s webrtc.PeerConnectionState) {
 	p.mu.Lock()
-	p.state = s  // this line updates the state change
+	p.state = s // this line updates the state change
 	p.mu.Unlock()
 
 	log.Printf("Peer Connection State has changed: %s\n", s.String())
@@ -77,7 +90,6 @@ func (p *WebRTCPeer) handleConnectionStateChange(s webrtc.PeerConnectionState) {
 		p.Close()
 	}
 }
-
 
 // handleDataChannel tab call hota hai jab remote peer ek data channel banata hai.
 func (p *WebRTCPeer) handleDataChannel(dc *webrtc.DataChannel) {
@@ -100,7 +112,6 @@ func (p *WebRTCPeer) handleDataChannel(dc *webrtc.DataChannel) {
 	})
 }
 
-
 // CreateOffer ek offer SDP generate karta hai
 func (p *WebRTCPeer) CreateOffer() (string, error) {
 	dc, err := p.pc.CreateDataChannel("data", nil)
@@ -120,12 +131,11 @@ func (p *WebRTCPeer) CreateOffer() (string, error) {
 	if err = p.pc.SetLocalDescription(offer); err != nil {
 		return "", err
 	}
-	<-gatherComplete  // yeh wait end ka signal karta hai
+	<-gatherComplete // yeh wait end ka signal karta hai
 
 	offerJSON, err := json.Marshal(p.pc.LocalDescription())
 	return string(offerJSON), err
 }
-
 
 // CreateAnswer ek answer SDP generate karta hai.
 func (p *WebRTCPeer) CreateAnswer(offerSDP string) (string, error) {
@@ -153,7 +163,6 @@ func (p *WebRTCPeer) CreateAnswer(offerSDP string) (string, error) {
 	return string(answerJSON), err
 }
 
-
 // SetAnswer remote peer se mile answer ko set karta hai.
 func (p *WebRTCPeer) SetAnswer(answerSDP string) error {
 	var answer webrtc.SessionDescription
@@ -163,8 +172,7 @@ func (p *WebRTCPeer) SetAnswer(answerSDP string) error {
 	return p.pc.SetRemoteDescription(answer)
 }
 
-
-//yeh function, specific timeout tak connection establish hone ka wait karta hai
+// yeh function, specific timeout tak connection establish hone ka wait karta hai
 func (p *WebRTCPeer) WaitForConnection(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -177,8 +185,7 @@ func (p *WebRTCPeer) WaitForConnection(timeout time.Duration) error {
 	}
 }
 
-
-//peer ka connection state check
+// peer ka connection state check
 func (p *WebRTCPeer) IsConnected() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -189,7 +196,7 @@ func (p *WebRTCPeer) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.signalingStream != nil { 
+	if p.signalingStream != nil {
 		p.signalingStream.Close()
 		p.signalingStream = nil
 	}
@@ -207,8 +214,7 @@ func (p *WebRTCPeer) SetSignalingStream(s network.Stream) {
 	p.signalingStream = s
 }
 
-
-//data ko JSON mein serialize kare data channels pe bhjeta hai
+// data ko JSON mein serialize kare data channels pe bhjeta hai
 func (p *WebRTCPeer) Send(data interface{}) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -223,7 +229,7 @@ func (p *WebRTCPeer) Send(data interface{}) error {
 	return p.dataChannel.SendText(string(bytes))
 }
 
-//file data ko bytes mein data channel par bhejta hai.
+// file data ko bytes mein data channel par bhejta hai.
 func (p *WebRTCPeer) SendRaw(data []byte) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -233,18 +239,16 @@ func (p *WebRTCPeer) SendRaw(data []byte) error {
 	return p.dataChannel.Send(data)
 }
 
-
-//Creates an empty file on your computer  (only called once)
-//SetFileWriter(emptyFile) to attach this empty file to the connection
+// Creates an empty file on your computer  (only called once)
+// SetFileWriter(emptyFile) to attach this empty file to the connection
 func (p *WebRTCPeer) SetFileWriter(writer io.WriteCloser) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.fileWriter = writer
 }
 
-
-//retrieve the attached file
-//gets called each time a chunk is sent
+// retrieve the attached file
+// gets called each time a chunk is sent
 func (p *WebRTCPeer) GetFileWriter() io.WriteCloser {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

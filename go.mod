@@ -4,7 +4,11 @@ go 1.23.8
 
 toolchain go1.24.4
 
-require github.com/pion/webrtc/v3 v3.2.40
+require (
+	github.com/gorilla/mux v1.8.1
+	github.com/pion/webrtc/v3 v3.2.40
+	github.com/rs/cors v1.11.1
+)
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
@@ -19,7 +23,7 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/pprof v0.0.0-20250607225305-033d6d78b36a // indirect
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/gorilla/websocket v1.5.3
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/ipfs/go-cid v0.5.0 // indirect
 	github.com/ipfs/go-log/v2 v2.6.0 // indirect
