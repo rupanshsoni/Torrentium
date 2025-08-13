@@ -33,8 +33,8 @@ import (
 	"torrentium/db"
 	"torrentium/p2p"
 	"torrentium/torrentfile"
-	"torrentium/webRTC"
-	torrentiumWebRTC "torrentium/webRTC"
+	"torrentium/webRTC_funcs"
+	torrentiumWebRTC "torrentium/webRTC_funcs"
 )
 
 // Client struct client application ki state aur components ko hold karta hai.

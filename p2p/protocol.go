@@ -7,7 +7,7 @@ import (
 	"io"
 	"log"
 
-	"torrentium/tracker"
+	tracker "torrentium/tracker_funcs"
 
 	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -16,7 +16,7 @@ import (
 
 // TrackerProtocolID ek unique string hai jo tracker ko network par pehchanta hai.
 // Isse peers ko pata chalta hai ki woh sahi tracker se baat kar rahe hain.
-const TrackerProtocolID = "/torrentium/tracker/1.0"
+const TrackerProtocolID = "/torrentium/tracker_funcs/1.0"
 
 // yeh struct tracker aur peer ke beech ke messaging ko define kar rha hai
 type Message struct {

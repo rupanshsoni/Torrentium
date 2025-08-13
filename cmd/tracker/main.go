@@ -10,7 +10,7 @@ import (
 
 	"torrentium/db"
 	"torrentium/p2p"
-	"torrentium/tracker"
+	tracker "torrentium/tracker_funcs"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
