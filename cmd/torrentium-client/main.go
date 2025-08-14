@@ -30,11 +30,11 @@ import (
 
 	"github.com/pion/webrtc/v3"
 
-	"torrentium/db"
-	"torrentium/p2p"
-	"torrentium/torrentfile"
-	"torrentium/webRTC_funcs"
-	torrentiumWebRTC "torrentium/webRTC_funcs"
+	"torrentium/internal/db"
+	"torrentium/internal/p2p"
+	"torrentium/internal/torrent"
+	"torrentium/internal/client"
+	torrentiumWebRTC "torrentium/internal/client"
 )
 
 // Client struct client application ki state aur components ko hold karta hai.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
-	"torrentium/db"
+	"torrentium/internal/db"
 
 	"github.com/google/uuid"
 )
