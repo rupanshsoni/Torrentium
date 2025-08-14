@@ -8,9 +8,9 @@ import (
 	"os"
 	"sync"
 
-	"torrentium/db"
-	"torrentium/p2p"
-	tracker "torrentium/tracker_funcs"
+	"torrentium/internal/db"
+	"torrentium/internal/p2p"
+	tracker "torrentium/internal/tracker"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"

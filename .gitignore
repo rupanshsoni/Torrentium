@@ -21,8 +21,8 @@ go.work.sum
 vendor/
 
 # Go module cache
-# *.mod
-# *.sum
+*.mod
+*.sum
 
 # Logs and temp files
 *.log
@@ -42,4 +42,4 @@ Thumbs.db
 .env
 # .env.*
 
-.vscode/
+.vscode

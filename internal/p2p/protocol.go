@@ -7,7 +7,7 @@ import (
 	"io"
 	"log"
 
-	tracker "torrentium/tracker_funcs"
+	tracker "torrentium/internal/tracker"
 
 	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p/core/host"
