@@ -75,24 +75,39 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	return h, idht, nil
 }
 
-
 // Add these improvements to your main function and Client struct
 
 // Improved bootstrapping function
 func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
-	// Default IPFS bootstrap nodes
+	// Updated bootstrap nodes with more reliable addresses
 	bootstrapNodes := []string{
+		// Official IPFS bootstrap nodes (mix of DNS and direct IP)
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VCk8JpNUQLoUPF3HfrDAQGS52a8",
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX89HWoNT4gEoNA7MzZqaGzyCu5w",
+
+		// Direct IP addresses as fallback (more reliable)
 		"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
+		"/ip4/104.236.179.241/tcp/4001/p2p/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM",
+		"/ip4/128.199.219.111/tcp/4001/p2p/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu",
+		"/ip4/104.236.76.40/tcp/4001/p2p/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64",
+
+		// Alternative public nodes
+		"/ip4/147.75.77.187/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+		"/ip6/2604:1380:1000:6000::1/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
 	}
 
 	fmt.Println("Connecting to bootstrap nodes...")
 	connected := 0
-	
-	for _, addrStr := range bootstrapNodes {
+	required := 3 
+	for i, addrStr := range bootstrapNodes {
+		// Stop early if we have enough connections
+		if connected >= 5 {
+			fmt.Printf("Already connected to %d nodes, stopping early\n", connected)
+			break
+		}
+
 		addr, err := multiaddr.NewMultiaddr(addrStr)
 		if err != nil {
 			log.Printf("Invalid bootstrap address %s: %v", addrStr, err)
@@ -105,7 +120,8 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 			continue
 		}
 
-		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// Use shorter timeout for individual connections
+		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		if err := h.Connect(connectCtx, *pi); err != nil {
 			log.Printf("Failed to connect to bootstrap node %s: %v", pi.ID, err)
 		} else {
@@ -113,13 +129,18 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 			connected++
 		}
 		cancel()
+
+		// Add small delay between connections to avoid overwhelming
+		if i < len(bootstrapNodes)-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 
-	if connected == 0 {
-		return fmt.Errorf("failed to connect to any bootstrap nodes")
+	if connected < required {
+		return fmt.Errorf("insufficient bootstrap connections: got %d, need at least %d", connected, required)
 	}
 
-	fmt.Printf("Successfully connected to %d bootstrap nodes\n", connected)
+	fmt.Printf("Successfully connected to %d bootstrap nodes (minimum %d required)\n", connected, required)
 
 	// Bootstrap the DHT
 	fmt.Println("Bootstrapping DHT...")
@@ -127,16 +148,40 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 		return fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
-	// Wait for DHT to become ready
+	// Wait for DHT to become ready with better feedback
 	fmt.Println("Waiting for DHT to become ready...")
-	select {
-	case <-d.RefreshRoutingTable():
-		fmt.Println("DHT routing table refreshed")
-	case <-time.After(60 * time.Second):
-		fmt.Println("DHT bootstrap timeout, continuing anyway...")
-	}
+	readyTimeout := time.After(45 * time.Second)
+	checkTicker := time.NewTicker(5 * time.Second)
+	defer checkTicker.Stop()
 
-	return nil
+	for {
+		select {
+		case <-readyTimeout:
+			routingTableSize := d.RoutingTable().Size()
+			if routingTableSize > 0 {
+				fmt.Printf("DHT partially ready (routing table size: %d), continuing...\n", routingTableSize)
+			} else {
+				fmt.Println("DHT bootstrap timeout, but continuing anyway...")
+			}
+			return nil
+
+		case <-checkTicker.C:
+			routingTableSize := d.RoutingTable().Size()
+			fmt.Printf("DHT routing table size: %d\n", routingTableSize)
+			if routingTableSize >= 10 {
+				fmt.Println("DHT is ready with good routing table!")
+				return nil
+			}
+
+		case <-d.RefreshRoutingTable():
+			routingTableSize := d.RoutingTable().Size()
+			fmt.Printf("DHT routing table refreshed (size: %d)\n", routingTableSize)
+			if routingTableSize >= 5 {
+				fmt.Println("DHT is ready!")
+				return nil
+			}
+		}
+	}
 }
 
 func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
