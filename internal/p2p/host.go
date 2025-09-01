@@ -47,8 +47,12 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		// Use the static relay
+		// Enable local network optimizations
+		libp2p.EnableRelay(),
+		// Use the static relay as backup only
 		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*relayInfo}),
+		// Enable hole punching for better connectivity
+		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
 		panic(err)
@@ -100,10 +104,10 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 
 	fmt.Println("Connecting to bootstrap nodes...")
 	connected := 0
-	required := 3 
+	required := 5
 	for i, addrStr := range bootstrapNodes {
 		// Stop early if we have enough connections
-		if connected >= 5 {
+		if connected >= required {
 			fmt.Printf("Already connected to %d nodes, stopping early\n", connected)
 			break
 		}
