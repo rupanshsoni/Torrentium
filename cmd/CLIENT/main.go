@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	webRTC "torrentium/Internal/client"
-	db "torrentium/Internal/db"
-	p2p "torrentium/Internal/p2p"
+	webRTC "torrentium/internal/client"
+	db "torrentium/internal/db"
+	p2p "torrentium/internal/p2p"
 
 	"github.com/dustin/go-humanize"
 	"github.com/ipfs/go-cid"
