@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,9 +34,10 @@ import (
 )
 
 const (
-	DefaultPieceSize = 1 << 20 // 1 MiB pieces
-	MaxProviders     = 10
-	MaxChunk         = 64 * 1024 // 64KiB chunks
+	DefaultPieceSize     = 1 << 20 // 1 MiB pieces
+	MaxProviders         = 10
+	MaxChunk             = 64 * 1024 // 64KiB chunks
+	MaxParallelDownloads = 3
 )
 
 type Client struct {
@@ -46,7 +46,8 @@ type Client struct {
 	webRTCPeers     map[peer.ID]*webRTC.SimpleWebRTCPeer
 	peersMux        sync.RWMutex
 	sharingFiles    map[string]*FileInfo
-	activeDownloads map[string]*os.File
+	activeDownloads map[string]*DownloadState
+	downloadsMux    sync.RWMutex
 	db              *db.Repository
 }
 
@@ -68,6 +69,18 @@ type controlMessage struct {
 	PieceHash string `json:"piece_hash,omitempty"`
 	Index     int64  `json:"index,omitempty"`
 	Filename  string `json:"filename,omitempty"`
+}
+
+type DownloadState struct {
+	File           *os.File
+	Manifest       controlMessage
+	TotalPieces    int
+	Pieces         []db.Piece
+	Completed      chan bool
+	Progress       *progressbar.ProgressBar
+	PieceStatus    []bool // true if piece is downloaded
+	PieceAssignees map[int]peer.ID
+	mu             sync.Mutex
 }
 
 var (
@@ -92,7 +105,7 @@ func NewClient(h host.Host, d *dht.IpfsDHT, repo *db.Repository) *Client {
 		dht:             d,
 		webRTCPeers:     make(map[peer.ID]*webRTC.SimpleWebRTCPeer),
 		sharingFiles:    make(map[string]*FileInfo),
-		activeDownloads: make(map[string]*os.File),
+		activeDownloads: make(map[string]*DownloadState),
 		db:              repo,
 	}
 }
@@ -626,103 +639,136 @@ func (c *Client) listConnectedPeers() {
 }
 
 func (c *Client) downloadFile(cidStr string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	fileCID, err := cid.Decode(cidStr)
 	if err != nil {
 		return fmt.Errorf("invalid CID: %w", err)
 	}
 
 	fmt.Printf("Looking for providers of CID: %s\n", fileCID.String())
-	providers, err := c.findProvidersWithTimeout(fileCID, 120*time.Second, 5)
+	providers, err := c.findProvidersWithTimeout(fileCID, 60*time.Second, MaxProviders)
 	if err != nil {
 		return fmt.Errorf("provider search failed: %w", err)
 	}
 
 	if len(providers) == 0 {
-		return fmt.Errorf("no providers found for CID: %s", fileCID.String())
+		return fmt.Errorf("no providers found")
 	}
 
-	fmt.Printf("Found %d provider(s). Attempting connections...\n", len(providers))
+	fmt.Printf("Found %d providers. Getting file manifest...\n", len(providers))
 
-	sort.Slice(providers, func(i, j int) bool {
-		si, _ := c.db.GetPeerScore(ctx, providers[i].ID.String())
-		sj, _ := c.db.GetPeerScore(ctx, providers[j].ID.String())
-		return si > sj
-	})
-
-	var lastErr error
-	for i, provider := range providers {
-		fmt.Printf("Trying provider %d/%d: %s\n", i+1, len(providers), provider.ID)
-		webrtcPeer, err := c.initiateWebRTCConnectionWithRetry(provider.ID, 2)
-		if err != nil {
-			fmt.Printf("Failed to connect to provider %s: %v\n", provider.ID, err)
-			_ = c.db.SetPeerScore(ctx, provider.ID.String(), -2)
-			lastErr = err
-			continue
-		}
-
-		if webrtcPeer == nil {
-			lastErr = fmt.Errorf("failed to establish a WebRTC connection with peer %s", provider.ID)
-			continue
-		}
-
-		// 1. Request the manifest to get the real filename first.
-		manifest, err := c.requestManifest(webrtcPeer, cidStr)
-		if err != nil {
-			webrtcPeer.Close()
-			lastErr = fmt.Errorf("failed to get manifest from peer %s: %w", provider.ID, err)
-			continue
-		}
-
-		// 2. Create a temporary file path with the original filename and a .download extension.
-		downloadPath := fmt.Sprintf("%s.download", manifest.Filename)
-		finalPath := manifest.Filename
-
-		localFile, err := os.Create(downloadPath)
-		if err != nil {
-			webrtcPeer.Close()
-			return fmt.Errorf("failed to create download file: %w", err)
-		}
-
-		webrtcPeer.SetFileWriter(localFile)
-		fmt.Printf("Downloading '%s' to '%s'...\n", finalPath, downloadPath)
-		request := map[string]string{
-			"command": "REQUEST_FILE",
-			"cid":     cidStr,
-		}
-
-		if err := webrtcPeer.SendJSON(request); err != nil {
-			webrtcPeer.Close()
-			localFile.Close()
-			os.Remove(downloadPath)
-			fmt.Printf("Failed to send file request to provider %s: %v", provider.ID, err)
-			lastErr = err
-			continue
-		}
-
-		fmt.Println("Download initiated successfully!")
-		_ = c.db.SetPeerScore(ctx, provider.ID.String(), +3)
-
-		// Wait for the connection to close, which signifies the download is complete.
-		<-webrtcPeer.WaitForCloseChannel()
-
-		// 3. Rename the file to its final name.
-		if err := os.Rename(downloadPath, finalPath); err != nil {
-			// If rename fails, it might be because the file is still open.
-			// Ensure it's closed before retrying.
-			if f, ok := webrtcPeer.GetFileWriter().(*os.File); ok {
-				f.Close()
+	// Get manifest from the first available peer
+	var manifest controlMessage
+	var firstPeer *webRTC.SimpleWebRTCPeer
+	for _, p := range providers {
+		peerConn, err := c.initiateWebRTCConnectionWithRetry(p.ID, 1)
+		if err == nil {
+			firstPeer = peerConn
+			manifest, err = c.requestManifest(firstPeer, cidStr)
+			if err == nil {
+				break
 			}
-			if err := os.Rename(downloadPath, finalPath); err != nil {
-				return fmt.Errorf("failed to rename downloaded file: %w", err)
-			}
+			firstPeer.Close()
 		}
-
-		fmt.Printf("\nDownload completed successfully! File saved as: %s\n", finalPath)
-		return nil
 	}
 
-	return fmt.Errorf("failed to connect to any compatible provider. Last error: %w", lastErr)
+	if firstPeer == nil {
+		return fmt.Errorf("failed to connect to any provider to get manifest")
+	}
+
+	// Prepare download state
+	downloadPath := fmt.Sprintf("%s.download", manifest.Filename)
+	finalPath := manifest.Filename
+	localFile, err := os.Create(downloadPath)
+	if err != nil {
+		firstPeer.Close()
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+
+	pieces, _ := c.db.GetPieces(ctx, cidStr)
+	state := &DownloadState{
+		File:           localFile,
+		Manifest:       manifest,
+		TotalPieces:    int(manifest.NumPieces),
+		Pieces:         pieces,
+		Completed:      make(chan bool, 1),
+		Progress:       progressbar.DefaultBytes(manifest.TotalSize, "downloading..."),
+		PieceStatus:    make([]bool, int(manifest.NumPieces)),
+		PieceAssignees: make(map[int]peer.ID),
+	}
+	c.downloadsMux.Lock()
+	c.activeDownloads[cidStr] = state
+	c.downloadsMux.Unlock()
+
+	var wg sync.WaitGroup
+	peersToUse := providers
+	if len(peersToUse) > MaxParallelDownloads {
+		peersToUse = peersToUse[:MaxParallelDownloads]
+	}
+
+	chunksPerPeer := state.TotalPieces / len(peersToUse)
+
+	for i, p := range peersToUse {
+		start := i * chunksPerPeer
+		end := start + chunksPerPeer
+		if i == len(peersToUse)-1 {
+			end = state.TotalPieces
+		}
+
+		wg.Add(1)
+		go func(peerInfo peer.AddrInfo, startPiece, endPiece int) {
+			defer wg.Done()
+			var peerConn *webRTC.SimpleWebRTCPeer
+			if peerInfo.ID.String() == firstPeer.GetSignalingStream().Conn().RemotePeer().String() {
+				peerConn = firstPeer
+			} else {
+				var connErr error
+				peerConn, connErr = c.initiateWebRTCConnectionWithRetry(peerInfo.ID, 2)
+				if connErr != nil {
+					log.Printf("Failed to connect to peer %s for chunk download: %v", peerInfo.ID, connErr)
+					return
+				}
+				defer peerConn.Close()
+			}
+			c.downloadChunksFromPeer(peerConn, state, startPiece, endPiece)
+		}(p, start, end)
+	}
+
+	wg.Wait()
+	localFile.Close()
+
+	// Finalize download
+	if err := os.Rename(downloadPath, finalPath); err != nil {
+		return fmt.Errorf("failed to rename file: %w", err)
+	}
+
+	fmt.Printf("\nDownload complete. File saved as %s\n", finalPath)
+	return nil
+}
+
+func (c *Client) downloadChunksFromPeer(peer *webRTC.SimpleWebRTCPeer, state *DownloadState, startPiece, endPiece int) {
+	for i := startPiece; i < endPiece; i++ {
+		state.mu.Lock()
+		if state.PieceStatus[i] {
+			state.mu.Unlock()
+			continue // Another peer finished it
+		}
+		state.PieceAssignees[i] = peer.GetSignalingStream().Conn().RemotePeer()
+		state.mu.Unlock()
+
+		req := controlMessage{
+			Command: "REQUEST_PIECE",
+			CID:     state.Manifest.CID,
+			Index:   int64(i),
+		}
+
+		if err := peer.SendJSON(req); err != nil {
+			log.Printf("Failed to request piece %d from %s: %v", i, peer.GetSignalingStream().Conn().RemotePeer(), err)
+			return
+		}
+	}
 }
 
 // requestManifest is a helper function to get file metadata from a peer.
@@ -954,25 +1000,52 @@ func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream)
 
 func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRTC.SimpleWebRTCPeer) {
 	if msg.IsString {
-		var ctrl controlMessage
+		var ctrl map[string]interface{}
 		if err := json.Unmarshal(msg.Data, &ctrl); err == nil {
-			if ctrl.Command == "DOWNLOAD_COMPLETE" {
+			switch ctrl["command"] {
+			case "PIECE_DATA":
+				cidStr := ctrl["cid"].(string)
+				index := int(ctrl["index"].(float64))
+				payload, _ := hex.DecodeString(ctrl["payload"].(string))
+
+				c.downloadsMux.RLock()
+				state, ok := c.activeDownloads[cidStr]
+				c.downloadsMux.RUnlock()
+
+				if ok {
+					state.mu.Lock()
+					defer state.mu.Unlock()
+
+					if !state.PieceStatus[index] {
+						piece := state.Pieces[index]
+						state.File.WriteAt(payload, piece.Offset)
+						state.PieceStatus[index] = true
+						state.Progress.Add(len(payload))
+
+						// Check for completion
+						completedPieces := 0
+						for _, s := range state.PieceStatus {
+							if s {
+								completedPieces++
+							}
+						}
+						if completedPieces == state.TotalPieces {
+							state.Completed <- true
+						}
+					}
+				}
+			case "DOWNLOAD_COMPLETE":
 				log.Println("Received download completion signal")
 				if w := peer.GetFileWriter(); w != nil {
 					w.Close()
 				}
-				// The connection will be closed by the uploader shortly after this.
-				// We can also close it here to be safe.
 				peer.Close()
-			} else {
-				c.handleControlMessage(ctrl, peer)
-			}
-		}
-	} else {
-		// Handle binary data (file content)
-		if w := peer.GetFileWriter(); w != nil {
-			if _, err := w.Write(msg.Data); err != nil {
-				log.Printf("Error writing file data: %v", err)
+			default:
+				// Handle other string-based messages by attempting to unmarshal into controlMessage
+				var controlMsg controlMessage
+				if err := json.Unmarshal(msg.Data, &controlMsg); err == nil {
+					c.handleControlMessage(controlMsg, peer)
+				}
 			}
 		}
 	}
@@ -982,17 +1055,17 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.SimpleWe
 	ctx := context.Background()
 	switch ctrl.Command {
 	case "REQUEST_FILE":
-		go c.handleFileRequest(ctx, ctrl, peer) // Run in a goroutine to avoid blocking
+		go c.handleFileRequest(ctx, ctrl, peer)
 	case "REQUEST_MANIFEST":
 		c.handleManifestRequest(ctx, ctrl, peer)
 	case "MANIFEST":
 		manifestChMu.Lock()
-		ch := manifestWaiters[ctrl.CID]
-		if ch != nil {
+		if ch, ok := manifestWaiters[ctrl.CID]; ok {
 			ch <- ctrl
 		}
 		manifestChMu.Unlock()
-	case "PIECE_OK":
+	case "REQUEST_PIECE":
+		go c.handlePieceRequest(ctx, ctrl, peer)
 	default:
 		log.Printf("Unknown control command: %s", ctrl.Command)
 	}
@@ -1057,6 +1130,47 @@ func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, pee
 	// Give the signal a moment to send before closing
 	time.Sleep(2 * time.Second)
 	peer.Close()
+}
+
+func (c *Client) handlePieceRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
+	pieces, err := c.db.GetPieces(ctx, ctrl.CID)
+	if err != nil || int(ctrl.Index) >= len(pieces) {
+		log.Printf("Invalid piece request for CID %s, index %d", ctrl.CID, ctrl.Index)
+		return
+	}
+
+	fileInfo, err := c.db.GetLocalFileByCID(ctx, ctrl.CID)
+	if err != nil {
+		log.Printf("File not found for piece request: %s", ctrl.CID)
+		return
+	}
+
+	file, err := os.Open(fileInfo.FilePath)
+	if err != nil {
+		log.Printf("Failed to open file for piece request: %v", err)
+		return
+	}
+	defer file.Close()
+
+	piece := pieces[ctrl.Index]
+	buffer := make([]byte, piece.Size)
+	_, err = file.ReadAt(buffer, piece.Offset)
+	if err != nil {
+		log.Printf("Failed to read piece %d: %v", ctrl.Index, err)
+		return
+	}
+
+	// Serialize piece data and send
+	dataMsg := map[string]interface{}{
+		"command": "PIECE_DATA",
+		"cid":     ctrl.CID,
+		"index":   ctrl.Index,
+		"payload": hex.EncodeToString(buffer),
+	}
+
+	if err := peer.SendJSON(dataMsg); err != nil {
+		log.Printf("Failed to send piece %d: %v", ctrl.Index, err)
+	}
 }
 
 func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
