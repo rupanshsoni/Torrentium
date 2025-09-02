@@ -41,7 +41,6 @@ const (
 	ConnectionStateClosed
 )
 
-// SimpleWebRTCPeer is a minimal, working WebRTC implementation
 type SimpleWebRTCPeer struct {
 	pc              *webrtc.PeerConnection
 	dc              *webrtc.DataChannel
@@ -315,6 +314,7 @@ func (p *SimpleWebRTCPeer) stopKeepAlive() {
 func (p *SimpleWebRTCPeer) WaitForCloseChannel() <-chan struct{} {
 	return p.closeCh
 }
+
 func (p *SimpleWebRTCPeer) SignalDownloadComplete() {
 	log.Printf("Download completed, closing connection")
 	p.Close()
@@ -322,64 +322,52 @@ func (p *SimpleWebRTCPeer) SignalDownloadComplete() {
 
 // TestICEConnectivity performs a basic ICE connectivity test
 func TestICEConnectivity() error {
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.cloudflare.com:3478"}},
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
-	}
-
-	pc, err := webrtc.NewPeerConnection(config)
+	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create test peer connection: %w", err)
+		return fmt.Errorf("failed to create test connection: %w", err)
 	}
 	defer pc.Close()
 
 	candidateCount := 0
-	done := make(chan bool, 1)
+	gatherComplete := make(chan struct{})
 
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			candidateCount++
 			log.Printf("Test ICE candidate: %s", candidate.String())
-		} else {
-			done <- true
 		}
 	})
 
 	pc.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
-		log.Printf("Test ICE gathering state: %s", state.String())
+		if state == webrtc.ICEGathererStateComplete {
+			close(gatherComplete)
+		}
 	})
 
-	// Create a dummy offer to trigger ICE gathering
-	dc, err := pc.CreateDataChannel("test", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create test data channel: %w", err)
+	if _, err = pc.CreateDataChannel("test", nil); err != nil {
+		return fmt.Errorf("failed to create test channel: %w", err)
 	}
-	defer dc.Close()
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		return fmt.Errorf("failed to create test offer: %w", err)
 	}
 
-	if err := pc.SetLocalDescription(offer); err != nil {
-		return fmt.Errorf("failed to set test local description: %w", err)
+	if err = pc.SetLocalDescription(offer); err != nil {
+		return fmt.Errorf("failed to set local description: %w", err)
 	}
 
-	// Wait for ICE gathering to complete or timeout
 	select {
-	case <-done:
-		log.Printf("ICE connectivity test completed with %d candidates", candidateCount)
+	case <-gatherComplete:
 		if candidateCount == 0 {
 			return fmt.Errorf("no ICE candidates generated - network connectivity issues")
 		}
 		return nil
-	case <-time.After(10 * time.Second):
-		log.Printf("ICE connectivity test timeout with %d candidates", candidateCount)
+	case <-time.After(maxICEGatheringTimeout):
 		if candidateCount == 0 {
-			return fmt.Errorf("ICE connectivity test failed - no candidates generated")
+			return fmt.Errorf("ICE gathering timeout - no candidates generated")
 		}
+		log.Printf("ICE gathering timed out with %d candidates", candidateCount)
 		return nil
 	}
 }
