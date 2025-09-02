@@ -47,9 +47,7 @@ type Client struct {
 	peersMux        sync.RWMutex
 	sharingFiles    map[string]*FileInfo
 	activeDownloads map[string]*os.File
-	//downloadsMux    sync.RWMutex
-	db *db.Repository
-	//rateLimitBps    int64
+	db              *db.Repository
 }
 
 type FileInfo struct {
@@ -59,14 +57,6 @@ type FileInfo struct {
 	Name     string
 	PieceSz  int64
 }
-
-// type pieceRequest struct {
-// 	Command string `json:"command"`
-// 	CID     string `json:"cid"`
-// 	Index   int64  `json:"index"`
-// 	Offset  int64  `json:"offset"`
-// 	Size    int64  `json:"size"`
-// }
 
 type controlMessage struct {
 	Command   string `json:"command"`
@@ -676,7 +666,18 @@ func (c *Client) downloadFile(cidStr string) error {
 			continue
 		}
 
-		downloadPath := fmt.Sprintf("%s.download", cidStr)
+		// 1. Request the manifest to get the real filename first.
+		manifest, err := c.requestManifest(webrtcPeer, cidStr)
+		if err != nil {
+			webrtcPeer.Close()
+			lastErr = fmt.Errorf("failed to get manifest from peer %s: %w", provider.ID, err)
+			continue
+		}
+
+		// 2. Create a temporary file path with the original filename and a .download extension.
+		downloadPath := fmt.Sprintf("%s.download", manifest.Filename)
+		finalPath := manifest.Filename
+
 		localFile, err := os.Create(downloadPath)
 		if err != nil {
 			webrtcPeer.Close()
@@ -684,7 +685,7 @@ func (c *Client) downloadFile(cidStr string) error {
 		}
 
 		webrtcPeer.SetFileWriter(localFile)
-		fmt.Printf("Downloading to %s...\n", downloadPath)
+		fmt.Printf("Downloading '%s' to '%s'...\n", finalPath, downloadPath)
 		request := map[string]string{
 			"command": "REQUEST_FILE",
 			"cid":     cidStr,
@@ -694,7 +695,7 @@ func (c *Client) downloadFile(cidStr string) error {
 			webrtcPeer.Close()
 			localFile.Close()
 			os.Remove(downloadPath)
-			fmt.Printf("Failed to send file request to provider %s: %v\n", provider.ID, err)
+			fmt.Printf("Failed to send file request to provider %s: %v", provider.ID, err)
 			lastErr = err
 			continue
 		}
@@ -702,45 +703,53 @@ func (c *Client) downloadFile(cidStr string) error {
 		fmt.Println("Download initiated successfully!")
 		_ = c.db.SetPeerScore(ctx, provider.ID.String(), +3)
 
-		// Start a goroutine to monitor download completion
-		downloadComplete := make(chan bool, 1)
-		go func() {
-			// Wait for download to complete or timeout
-			select {
-			case <-webrtcPeer.WaitForCloseChannel():
-				downloadComplete <- true
-			case <-time.After(5 * time.Minute): // 5 minute timeout for download
-				log.Printf("Download timeout reached, closing connection")
-				webrtcPeer.Close()
-				downloadComplete <- false
+		// Wait for the connection to close, which signifies the download is complete.
+		<-webrtcPeer.WaitForCloseChannel()
+
+		// 3. Rename the file to its final name.
+		if err := os.Rename(downloadPath, finalPath); err != nil {
+			// If rename fails, it might be because the file is still open.
+			// Ensure it's closed before retrying.
+			if f, ok := webrtcPeer.GetFileWriter().(*os.File); ok {
+				f.Close()
 			}
-		}()
-
-		// Wait for download completion
-		success := <-downloadComplete
-
-		// Clean up WebRTC connection
-		webrtcPeer.Close()
-		localFile.Close()
-
-		// Remove from active connections
-		c.peersMux.Lock()
-		delete(c.webRTCPeers, provider.ID)
-		c.peersMux.Unlock()
-
-		if success {
-			fmt.Println("Download completed successfully!")
-		} else {
-			fmt.Println("Download failed or timed out")
-			os.Remove(downloadPath)
-			lastErr = fmt.Errorf("download timeout")
-			continue
+			if err := os.Rename(downloadPath, finalPath); err != nil {
+				return fmt.Errorf("failed to rename downloaded file: %w", err)
+			}
 		}
 
+		fmt.Printf("\nDownload completed successfully! File saved as: %s\n", finalPath)
 		return nil
 	}
 
 	return fmt.Errorf("failed to connect to any compatible provider. Last error: %w", lastErr)
+}
+
+// requestManifest is a helper function to get file metadata from a peer.
+func (c *Client) requestManifest(peer *webRTC.SimpleWebRTCPeer, cidStr string) (controlMessage, error) {
+	req := controlMessage{Command: "REQUEST_MANIFEST", CID: cidStr}
+	if err := peer.SendJSON(req); err != nil {
+		return controlMessage{}, err
+	}
+
+	// Wait for the manifest response
+	manifestCh := make(chan controlMessage, 1)
+	manifestChMu.Lock()
+	manifestWaiters[cidStr] = manifestCh
+	manifestChMu.Unlock()
+
+	defer func() {
+		manifestChMu.Lock()
+		delete(manifestWaiters, cidStr)
+		manifestChMu.Unlock()
+	}()
+
+	select {
+	case manifest := <-manifestCh:
+		return manifest, nil
+	case <-time.After(30 * time.Second):
+		return controlMessage{}, fmt.Errorf("timed out waiting for manifest")
+	}
 }
 
 func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetries int) (*webRTC.SimpleWebRTCPeer, error) {
@@ -947,19 +956,23 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRT
 	if msg.IsString {
 		var ctrl controlMessage
 		if err := json.Unmarshal(msg.Data, &ctrl); err == nil {
-			c.handleControlMessage(ctrl, peer)
+			if ctrl.Command == "DOWNLOAD_COMPLETE" {
+				log.Println("Received download completion signal")
+				if w := peer.GetFileWriter(); w != nil {
+					w.Close()
+				}
+				// The connection will be closed by the uploader shortly after this.
+				// We can also close it here to be safe.
+				peer.Close()
+			} else {
+				c.handleControlMessage(ctrl, peer)
+			}
 		}
 	} else {
 		// Handle binary data (file content)
 		if w := peer.GetFileWriter(); w != nil {
-			bytesWritten, err := w.Write(msg.Data)
-			if err != nil {
+			if _, err := w.Write(msg.Data); err != nil {
 				log.Printf("Error writing file data: %v", err)
-			} else {
-				// Update download progress if possible
-				if bytesWritten > 0 {
-					log.Printf("Downloaded %d bytes", len(msg.Data))
-				}
 			}
 		}
 	}
@@ -986,12 +999,6 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.SimpleWe
 }
 
 func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
-	defer func() {
-		// Close connection after file transfer is complete
-		log.Printf("File transfer completed, closing WebRTC connection")
-		peer.SignalDownloadComplete()
-	}()
-
 	fileInfo, exists := c.sharingFiles[ctrl.CID]
 	if !exists {
 		localFile, err := c.db.GetLocalFileByCID(ctx, ctrl.CID)
@@ -1022,40 +1029,14 @@ func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, pee
 	)
 
 	buffer := make([]byte, MaxChunk)
-	totalSent := int64(0)
-	startTime := time.Now()
-	lastProgressTime := time.Now()
-
 	for {
-		// Check for timeout on very large files (more than 5 minutes)
-		if time.Since(startTime) > 5*time.Minute && fileInfo.Size > 100*1024*1024 {
-			log.Printf("File transfer timeout after 5 minutes for large file")
-			break
-		}
-
 		n, err := file.Read(buffer)
 		if n > 0 {
 			if sendErr := peer.SendRaw(buffer[:n]); sendErr != nil {
 				log.Printf("Error sending data: %v", sendErr)
 				break
 			}
-			totalSent += int64(n)
 			bar.Add(n)
-
-			// Log progress every 10MB for large files
-			if time.Since(lastProgressTime) > 5*time.Second && fileInfo.Size > 10*1024*1024 {
-				progress := float64(totalSent) / float64(fileInfo.Size) * 100
-				log.Printf("Upload progress: %.1f%% (%s / %s)",
-					progress,
-					humanize.Bytes(uint64(totalSent)),
-					humanize.Bytes(uint64(fileInfo.Size)))
-				lastProgressTime = time.Now()
-			}
-
-			// Add small delay for large files to prevent overwhelming
-			if fileInfo.Size > 10*1024*1024 { // 10MB
-				time.Sleep(10 * time.Millisecond)
-			}
 		}
 		if err == io.EOF {
 			break
@@ -1066,7 +1047,16 @@ func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, pee
 		}
 	}
 
-	fmt.Printf("\nFile upload completed: %s (%s)\n", fileInfo.Name, humanize.Bytes(uint64(totalSent)))
+	// Signal that the download is complete
+	log.Println("\nFile upload finished, sending completion signal.")
+	completionSignal := controlMessage{Command: "DOWNLOAD_COMPLETE"}
+	if err := peer.SendJSON(completionSignal); err != nil {
+		log.Printf("Failed to send download completion signal: %v", err)
+	}
+
+	// Give the signal a moment to send before closing
+	time.Sleep(2 * time.Second)
+	peer.Close()
 }
 
 func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
