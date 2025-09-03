@@ -35,7 +35,7 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	fmt.Println("debugging 11")
 
 	// Configure the static relay
-	relayAddr, err := multiaddr.NewMultiaddr("/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWCrg8BnhFDXwM6GNPVmQHZjfkadQ5D7xG7nYBdUUJtcNS")
+	relayAddr, err := multiaddr.NewMultiaddr("/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWDzR4XF65JtKrbQWG42QajS9ox2ptBwdRkQ7un6h7RAKQ")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse relay address: %w", err)
 	}
