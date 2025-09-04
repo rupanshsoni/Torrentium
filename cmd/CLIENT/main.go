@@ -38,6 +38,7 @@ const (
 	MaxProviders         = 10
 	MaxChunk             = 16 * 1024 // 16KiB chunks
 	MaxParallelDownloads = 3
+	PieceTimeout         = 60 * time.Second // New: Timeout for downloading a single piece
 )
 
 type Client struct {
@@ -87,6 +88,7 @@ type DownloadState struct {
 	pieceBuffers    map[int][][]byte // Buffer to reassemble chunks into pieces
 	mu              sync.Mutex
 	completedPieces int
+	pieceTimers     map[int]*time.Timer // New: Timers for each piece
 }
 
 var (
@@ -712,6 +714,7 @@ func (c *Client) downloadFile(cidStr string) error {
 		PieceAssignees:  make(map[int]peer.ID),
 		pieceBuffers:    make(map[int][][]byte),
 		completedPieces: 0,
+		pieceTimers:     make(map[int]*time.Timer),
 	}
 	c.downloadsMux.Lock()
 	c.activeDownloads[cidStr] = state
@@ -778,11 +781,36 @@ func (c *Client) downloadChunksFromPeer(peer *webRTC.SimpleWebRTCPeer, state *Do
 			Index:   int64(i),
 		}
 
+		// New: Add piece timeout
+		state.mu.Lock()
+		state.pieceTimers[i] = time.AfterFunc(PieceTimeout, func() {
+			log.Printf("Piece %d timed out, re-requesting...", i)
+			c.reRequestPiece(state, i)
+		})
+		state.mu.Unlock()
+
 		if err := peer.SendJSON(req); err != nil {
 			log.Printf("Failed to request piece %d from %s: %v", i, peer.GetSignalingStream().Conn().RemotePeer(), err)
 			return
 		}
 	}
+}
+
+func (c *Client) reRequestPiece(state *DownloadState, pieceIndex int) {
+	// For simplicity, we'll just re-request from any connected peer.
+	// A more advanced implementation would select a new peer.
+	for _, p := range c.webRTCPeers {
+		req := controlMessage{
+			Command: "REQUEST_PIECE",
+			CID:     state.Manifest.CID,
+			Index:   int64(pieceIndex),
+		}
+		if err := p.SendJSON(req); err == nil {
+			log.Printf("Re-requested piece %d from a different peer.", pieceIndex)
+			return
+		}
+	}
+	log.Printf("Failed to re-request piece %d: no available peers.", pieceIndex)
 }
 
 func (c *Client) requestManifest(peer *webRTC.SimpleWebRTCPeer, cidStr string) (controlMessage, error) {
@@ -953,6 +981,7 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRT
 	}
 
 	var ctrl controlMessage
+	// ctrl.Command := 'PING'
 	if err := json.Unmarshal(msg.Data, &ctrl); err != nil {
 		var ping map[string]string
 		if err2 := json.Unmarshal(msg.Data, &ping); err2 == nil {
@@ -1027,6 +1056,12 @@ func (c *Client) handlePieceChunk(ctrl controlMessage) {
 	}
 
 	if isComplete {
+		// New: Stop the timer for this piece
+		if timer, ok := state.pieceTimers[int(ctrl.Index)]; ok {
+			timer.Stop()
+			delete(state.pieceTimers, int(ctrl.Index))
+		}
+
 		// Reassemble and write piece
 		pieceData := make([]byte, 0, pieceSize)
 		for _, chunk := range state.pieceBuffers[int(ctrl.Index)] {
