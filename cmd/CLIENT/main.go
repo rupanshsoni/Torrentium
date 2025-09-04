@@ -60,31 +60,33 @@ type FileInfo struct {
 }
 
 type controlMessage struct {
-	Command     string `json:"command"`
-	CID         string `json:"cid,omitempty"`
-	PieceSize   int64  `json:"piece_size,omitempty"`
-	TotalSize   int64  `json:"total_size,omitempty"`
-	HashHex     string `json:"hash_hex,omitempty"`
-	NumPieces   int64  `json:"num_pieces,omitempty"`
-	PieceHash   string `json:"piece_hash,omitempty"`
-	Index       int64  `json:"index,omitempty"`
-	Filename    string `json:"filename,omitempty"`
-	ChunkIndex  int    `json:"chunk_index,omitempty"`
-	TotalChunks int    `json:"total_chunks,omitempty"`
-	Payload     string `json:"payload,omitempty"`
+	Command     string      `json:"command"`
+	CID         string      `json:"cid,omitempty"`
+	PieceSize   int64       `json:"piece_size,omitempty"`
+	TotalSize   int64       `json:"total_size,omitempty"`
+	HashHex     string      `json:"hash_hex,omitempty"`
+	NumPieces   int64       `json:"num_pieces,omitempty"`
+	Pieces      []db.Piece  `json:"pieces,omitempty"`
+	PieceHash   string      `json:"piece_hash,omitempty"`
+	Index       int64       `json:"index,omitempty"`
+	Filename    string      `json:"filename,omitempty"`
+	ChunkIndex  int         `json:"chunk_index,omitempty"`
+	TotalChunks int         `json:"total_chunks,omitempty"`
+	Payload     string      `json:"payload,omitempty"`
 }
 
 type DownloadState struct {
-	File           *os.File
-	Manifest       controlMessage
-	TotalPieces    int
-	Pieces         []db.Piece
-	Completed      chan bool
-	Progress       *progressbar.ProgressBar
-	PieceStatus    []bool // true if piece is downloaded
-	PieceAssignees map[int]peer.ID
-	pieceBuffers   map[int][][]byte // Buffer to reassemble chunks into pieces
-	mu             sync.Mutex
+	File            *os.File
+	Manifest        controlMessage
+	TotalPieces     int
+	Pieces          []db.Piece
+	Completed       chan bool
+	Progress        *progressbar.ProgressBar
+	PieceStatus     []bool // true if piece is downloaded
+	PieceAssignees  map[int]peer.ID
+	pieceBuffers    map[int][][]byte // Buffer to reassemble chunks into pieces
+	mu              sync.Mutex
+	completedPieces int
 }
 
 var (
@@ -679,6 +681,13 @@ func (c *Client) downloadFile(cidStr string) error {
 		return fmt.Errorf("failed to connect to any provider to get manifest")
 	}
 
+	// Store pieces in the database
+	for _, piece := range manifest.Pieces {
+		if err := c.db.UpsertPiece(ctx, cidStr, piece.Index, piece.Offset, piece.Size, piece.Hash, false); err != nil {
+			log.Printf("Failed to store piece info for download: %v", err)
+		}
+	}
+
 	downloadPath := fmt.Sprintf("%s.download", manifest.Filename)
 	finalPath := manifest.Filename
 	localFile, err := os.Create(downloadPath)
@@ -688,16 +697,21 @@ func (c *Client) downloadFile(cidStr string) error {
 	}
 
 	pieces, _ := c.db.GetPieces(ctx, cidStr)
+	if len(pieces) == 0 {
+		return fmt.Errorf("failed to retrieve piece information after receiving manifest")
+	}
+
 	state := &DownloadState{
-		File:           localFile,
-		Manifest:       manifest,
-		TotalPieces:    int(manifest.NumPieces),
-		Pieces:         pieces,
-		Completed:      make(chan bool, 1),
-		Progress:       progressbar.DefaultBytes(manifest.TotalSize, "downloading..."),
-		PieceStatus:    make([]bool, int(manifest.NumPieces)),
-		PieceAssignees: make(map[int]peer.ID),
-		pieceBuffers:   make(map[int][][]byte),
+		File:            localFile,
+		Manifest:        manifest,
+		TotalPieces:     int(manifest.NumPieces),
+		Pieces:          pieces,
+		Completed:       make(chan bool, 1),
+		Progress:        progressbar.DefaultBytes(manifest.TotalSize, "downloading..."),
+		PieceStatus:     make([]bool, int(manifest.NumPieces)),
+		PieceAssignees:  make(map[int]peer.ID),
+		pieceBuffers:    make(map[int][][]byte),
+		completedPieces: 0,
 	}
 	c.downloadsMux.Lock()
 	c.activeDownloads[cidStr] = state
@@ -934,16 +948,21 @@ func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream)
 
 func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRTC.SimpleWebRTCPeer) {
 	if !msg.IsString {
-		log.Println("Received binary message, but expecting JSON control messages.")
+		log.Printf("Received unexpected binary message, expecting JSON.")
 		return
 	}
 
 	var ctrl controlMessage
 	if err := json.Unmarshal(msg.Data, &ctrl); err != nil {
+		var ping map[string]string
+		if err2 := json.Unmarshal(msg.Data, &ping); err2 == nil {
+			if ping["type"] == "ping" {
+				return // Ignore pings
+			}
+		}
 		log.Printf("Failed to unmarshal control message: %v", err)
 		return
 	}
-
 	c.handleControlMessage(ctrl, peer)
 }
 
@@ -962,6 +981,7 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.SimpleWe
 		go c.handlePieceRequest(ctx, ctrl, peer)
 	case "PIECE_CHUNK":
 		c.handlePieceChunk(ctrl)
+
 	default:
 		log.Printf("Unknown control command: %s", ctrl.Command)
 	}
@@ -982,18 +1002,18 @@ func (c *Client) handlePieceChunk(ctrl controlMessage) {
 		return // Already have this piece
 	}
 
-	if _, ok := state.pieceBuffers[int(ctrl.Index)]; !ok {
+	if state.pieceBuffers[int(ctrl.Index)] == nil {
 		state.pieceBuffers[int(ctrl.Index)] = make([][]byte, ctrl.TotalChunks)
 	}
 
 	chunkData, err := hex.DecodeString(ctrl.Payload)
 	if err != nil {
-		log.Printf("Error decoding chunk payload: %v", err)
+		log.Printf("Failed to decode chunk payload: %v", err)
 		return
 	}
 
 	state.pieceBuffers[int(ctrl.Index)][ctrl.ChunkIndex] = chunkData
-	state.Progress.Add(len(chunkData))
+	_ = state.Progress.Add(len(chunkData))
 
 	// Check if piece is complete
 	isComplete := true
@@ -1007,34 +1027,33 @@ func (c *Client) handlePieceChunk(ctrl controlMessage) {
 	}
 
 	if isComplete {
-		// Reassemble the piece
+		// Reassemble and write piece
 		pieceData := make([]byte, 0, pieceSize)
 		for _, chunk := range state.pieceBuffers[int(ctrl.Index)] {
 			pieceData = append(pieceData, chunk...)
 		}
 
-		// Verify hash (optional but recommended)
-		// ...
+		// Verify piece hash
+		h := sha256.New()
+		h.Write(pieceData)
+		hash := hex.EncodeToString(h.Sum(nil))
 
-		// Write to file
-		offset := state.Pieces[ctrl.Index].Offset
-		if _, err := state.File.WriteAt(pieceData, offset); err != nil {
-			log.Printf("Error writing piece %d to file: %v", ctrl.Index, err)
+		if hash != state.Pieces[ctrl.Index].Hash {
+			log.Printf("Piece %d hash mismatch", ctrl.Index)
+			state.pieceBuffers[int(ctrl.Index)] = nil // Clear buffer to retry
+			return
+		}
+
+		if _, err := state.File.WriteAt(pieceData, state.Pieces[ctrl.Index].Offset); err != nil {
+			log.Printf("Failed to write piece %d to file: %v", ctrl.Index, err)
 			return
 		}
 
 		state.PieceStatus[ctrl.Index] = true
+		state.completedPieces++
 		delete(state.pieceBuffers, int(ctrl.Index))
 
-		// Check if all pieces are downloaded
-		allDone := true
-		for _, status := range state.PieceStatus {
-			if !status {
-				allDone = false
-				break
-			}
-		}
-		if allDone {
+		if state.completedPieces == state.TotalPieces {
 			state.Completed <- true
 		}
 	}
@@ -1111,6 +1130,7 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 		TotalSize: localFile.FileSize,
 		HashHex:   localFile.FileHash,
 		NumPieces: int64(len(pieces)),
+		Pieces:    pieces,
 		Filename:  localFile.Filename,
 	}
 
@@ -1120,8 +1140,6 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 }
 
 func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
-	// This function is now superseded by piece-based requests.
-	// You might keep it for small files or as a fallback, but for now, we'll have it do nothing.
 	log.Printf("Note: handleFileRequest is deprecated in favor of piece-based transfers.")
 }
 

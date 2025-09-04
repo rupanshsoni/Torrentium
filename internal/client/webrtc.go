@@ -46,8 +46,9 @@ type SimpleWebRTCPeer struct {
 	dc              *webrtc.DataChannel
 	onMessage       func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer)
 	fileWriter      io.WriteCloser
-	writerMutex     sync.Mutex
+	writerMutex     sync.RWMutex
 	signalingStream network.Stream
+	streamMux       sync.RWMutex
 	state           ConnectionState
 	stateMux        sync.RWMutex
 	closeOnce       sync.Once
@@ -216,6 +217,9 @@ func (p *SimpleWebRTCPeer) Close() {
 		if p.pc != nil {
 			p.pc.Close()
 		}
+		if s := p.GetSignalingStream(); s != nil {
+			s.Close()
+		}
 		close(p.closeCh)
 	})
 }
@@ -227,16 +231,20 @@ func (p *SimpleWebRTCPeer) SetFileWriter(w io.WriteCloser) {
 }
 
 func (p *SimpleWebRTCPeer) GetFileWriter() io.WriteCloser {
-	p.writerMutex.Lock()
-	defer p.writerMutex.Unlock()
+	p.writerMutex.RLock()
+	defer p.writerMutex.RUnlock()
 	return p.fileWriter
 }
 
 func (p *SimpleWebRTCPeer) SetSignalingStream(s network.Stream) {
+	p.streamMux.Lock()
+	defer p.streamMux.Unlock()
 	p.signalingStream = s
 }
 
 func (p *SimpleWebRTCPeer) GetSignalingStream() network.Stream {
+	p.streamMux.RLock()
+	defer p.streamMux.RUnlock()
 	return p.signalingStream
 }
 
