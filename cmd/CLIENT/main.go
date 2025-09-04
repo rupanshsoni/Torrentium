@@ -99,7 +99,7 @@ func setupGracefulShutdown(h host.Host) {
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-ch
-		fmt.Println("\nShutting down gracefully...")
+		log.Println("Shutting down gracefully...")
 		_ = h.Close()
 		os.Exit(0)
 	}()
@@ -120,11 +120,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Use a custom logger that doesn't print timestamps
-	log.SetFlags(0)
-
 	if err := godotenv.Load(); err != nil {
-		// This is not a critical error, so we don't need to log it
+		log.Printf("Warning: Could not load .env file: %v", err)
 	}
 
 	DB := db.InitDB()
@@ -138,7 +135,6 @@ func main() {
 	}
 	defer h.Close()
 
-	fmt.Println("Connecting to the network...")
 	go func() {
 		if err := p2p.Bootstrap(ctx, h, d); err != nil {
 			log.Printf("Error bootstrapping DHT: %v", err)
@@ -154,6 +150,7 @@ func main() {
 
 	client.commandLoop()
 }
+
 func (c *Client) commandLoop() {
 	scanner := bufio.NewScanner(os.Stdin)
 	c.printInstructions()
@@ -183,6 +180,7 @@ func (c *Client) commandLoop() {
 			if len(args) != 1 {
 				fmt.Println("Usage: search <cid|text>")
 			} else {
+				c.checkConnectionHealth()
 				if strings.HasPrefix(args[0], "bafy") || strings.HasPrefix(args[0], "Qm") {
 					err = c.enhancedSearchByCID(args[0])
 				} else {
@@ -200,6 +198,7 @@ func (c *Client) commandLoop() {
 		case "connect":
 			if len(args) != 1 {
 				fmt.Println("Usage: connect <multiaddr>")
+				fmt.Println("Example: connect /ip4/127.0.0.1/tcp/54437/p2p/12D3KooWBLZFWsGZxoCFC8NsFgKvD6WJ6xV9UmYdR8t2C1kqYTcd")
 			} else {
 				err = c.connectToPeer(args[0])
 			}
@@ -211,6 +210,10 @@ func (c *Client) commandLoop() {
 			}
 		case "health":
 			c.checkConnectionHealth()
+		case "nettest":
+			c.performNetworkDiagnostics()
+		case "localtest":
+			c.performLocalWebRTCTest()
 		case "debug":
 			c.debugNetworkStatus()
 		case "exit":
@@ -223,45 +226,53 @@ func (c *Client) commandLoop() {
 		}
 	}
 }
+
 func (c *Client) printInstructions() {
-	fmt.Println("\n=== Torrentium P2P File Sharing ===")
+	fmt.Println("\n=== Decentralized P2P File Sharing ===")
 	fmt.Println("Commands:")
-	fmt.Println("  add <path>           - Share a file")
-	fmt.Println("  list                 - List shared files")
-	fmt.Println("  search <cid|text>    - Search for a file")
-	fmt.Println("  download <cid>       - Download a file")
-	fmt.Println("  peers                - Show connected peers")
-	fmt.Println("  connect <multiaddr>  - Connect to a peer")
-	fmt.Println("  announce <cid>       - Re-announce a file")
-	fmt.Println("  health               - Check network health")
-	fmt.Println("  debug                - Show debug info")
-	fmt.Println("  help                 - Show this help menu")
-	fmt.Println("  exit                 - Exit")
+	fmt.Println(" add <path>           - Share a file on the network")
+	fmt.Println(" list                 - List your shared files")
+	fmt.Println(" search <cid|text>    - Search by CID or filename text")
+	fmt.Println(" download <cid>       - Download a file by CID")
+	fmt.Println(" peers                - Show connected peers")
+	fmt.Println(" connect <multiaddr>  - Manually connect to a peer")
+	fmt.Println(" announce <cid>       - Re-announce a file to DHT")
+	fmt.Println(" health               - Check connection health")
+	fmt.Println(" nettest              - Perform comprehensive network diagnostics")
+	fmt.Println(" localtest            - Test local WebRTC functionality")
+	fmt.Println(" debug                - Show detailed network debug info")
+	fmt.Println(" help                 - Show this help")
+	fmt.Println(" exit                 - Exit the application")
 	fmt.Printf("\nYour Peer ID: %s\n", c.host.ID())
+	fmt.Printf("Listening on: %v\n\n", c.host.Addrs())
 }
+
 func (c *Client) debugNetworkStatus() {
 	fmt.Println("\n=== Network Debug Info ===")
-	fmt.Printf("Peer ID: %s\n", c.host.ID())
-	fmt.Println("Addresses:")
+	fmt.Printf("Our Peer ID: %s\n", c.host.ID())
+	fmt.Printf("Our Addresses:\n")
 	for _, addr := range c.host.Addrs() {
-		fmt.Printf("  %s/p2p/%s\n", addr, c.host.ID())
+		fmt.Printf(" %s/p2p/%s\n", addr, c.host.ID())
 	}
 
 	peers := c.host.Network().Peers()
-	fmt.Printf("\nConnected Peers: %d\n", len(peers))
+	fmt.Printf("\nConnected Peers (%d):\n", len(peers))
 	for i, peerID := range peers {
 		conn := c.host.Network().ConnsToPeer(peerID)
 		if len(conn) > 0 {
-			fmt.Printf("  %d. %s (%s)\n", i+1, peerID, conn[0].RemoteMultiaddr())
+			fmt.Printf(" %d. %s\n", i+1, peerID)
+			fmt.Printf("    Address: %s\n", conn[0].RemoteMultiaddr())
 		}
 	}
 
 	routingTableSize := c.dht.RoutingTable().Size()
 	fmt.Printf("\nDHT Routing Table Size: %d\n", routingTableSize)
 
-	fmt.Printf("\nShared Files: %d\n", len(c.sharingFiles))
+	fmt.Printf("\nShared Files (%d):\n", len(c.sharingFiles))
 	for cid, fileInfo := range c.sharingFiles {
-		fmt.Printf("  - %s (%s)\n", fileInfo.Name, cid)
+		fmt.Printf(" CID: %s\n", cid)
+		fmt.Printf(" File: %s\n", fileInfo.Name)
+		fmt.Printf(" ---\n")
 	}
 }
 
@@ -270,13 +281,13 @@ func (c *Client) announceFile(cidStr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid CID: %w", err)
 	}
-	fmt.Printf("Re-announcing %s...\n", cidStr)
+	fmt.Printf("Re-announcing CID %s to DHT...\n", cidStr)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := c.dht.Provide(ctx, fileCID, true); err != nil {
 		return fmt.Errorf("failed to announce: %w", err)
 	}
-	fmt.Println("Successfully announced.")
+	fmt.Println(" - Successfully announced to DHT")
 	return nil
 }
 
@@ -285,38 +296,130 @@ func (c *Client) startDHTMaintenance() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
+			log.Println("Performing DHT maintenance...")
 			c.dht.RefreshRoutingTable()
+			peers := c.host.Network().Peers()
+			log.Printf("Connected to %d peers", len(peers))
+			if len(peers) < 5 {
+				log.Println("Low peer count; re-bootstrapping...")
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				_ = p2p.Bootstrap(ctx, c.host, c.dht)
+				cancel()
+			}
 		}
 	}()
 }
 
 func (c *Client) checkConnectionHealth() {
 	peers := c.host.Network().Peers()
-	fmt.Println("\n=== Connection Health ===")
+	fmt.Printf("\n=== Connection Health ===\n")
 	fmt.Printf("Connected peers: %d\n", len(peers))
 	if len(peers) < 3 {
-		fmt.Println("Warning: Low peer count. File discovery may be slow.")
+		fmt.Println(" - Warning: Low peer count. Consider restarting or checking network connectivity.")
 	} else {
-		fmt.Println("Peer connectivity is good.")
+		fmt.Println(" - Good peer connectivity")
 	}
 
 	routingTableSize := c.dht.RoutingTable().Size()
 	fmt.Printf("DHT routing table size: %d\n", routingTableSize)
 	if routingTableSize < 10 {
-		fmt.Println("Warning: DHT routing table is small. File discovery may be limited.")
+		fmt.Println(" - Warning: Small DHT routing table. File discovery may be limited.")
 	} else {
-		fmt.Println("DHT connectivity is good.")
+		fmt.Println(" - Good DHT connectivity")
 	}
 }
 
 func (c *Client) performNetworkDiagnostics() {
-	// This functionality is now integrated into the `health` and `debug` commands
-	fmt.Println("Network diagnostics are now part of the 'health' and 'debug' commands.")
+	fmt.Println("\n=== Network Diagnostics ===")
+
+	// Check our addresses and detect local network
+	fmt.Printf("Our listening addresses:\n")
+	hasLocalAddr := false
+	for _, addr := range c.host.Addrs() {
+		addrStr := addr.String()
+		fmt.Printf(" - %s/p2p/%s\n", addr, c.host.ID())
+		if strings.Contains(addrStr, "192.168.") || strings.Contains(addrStr, "10.") || strings.Contains(addrStr, "172.") {
+			hasLocalAddr = true
+		}
+	}
+
+	if hasLocalAddr {
+		fmt.Println("✅ Local network addresses detected - optimized for same-network connections")
+	} else {
+		fmt.Println("ℹ️  No local network addresses detected")
+	}
+
+	// Test ICE connectivity
+	fmt.Println("\nTesting ICE connectivity...")
+	if err := webRTC.TestICEConnectivity(); err != nil {
+		fmt.Printf("❌ ICE connectivity test failed: %v\n", err)
+		fmt.Println("This indicates potential WebRTC connection issues")
+	} else {
+		fmt.Println("✅ ICE connectivity test passed")
+	}
+
+	// Check libp2p connectivity
+	peers := c.host.Network().Peers()
+	fmt.Printf("\nlibp2p peer connections: %d\n", len(peers))
+	if len(peers) > 0 {
+		fmt.Println("Connected peers:")
+		for i, peerID := range peers {
+			if i >= 5 { // Limit output
+				fmt.Printf(" ... and %d more\n", len(peers)-5)
+				break
+			}
+			conn := c.host.Network().ConnsToPeer(peerID)
+			if len(conn) > 0 {
+				remoteAddr := conn[0].RemoteMultiaddr().String()
+				fmt.Printf(" - %s (%s)\n", peerID, remoteAddr)
+				if strings.Contains(remoteAddr, "192.168.") || strings.Contains(remoteAddr, "10.") || strings.Contains(remoteAddr, "172.") {
+					fmt.Printf("   ✅ Local network peer\n")
+				}
+			}
+		}
+	}
+
+	// Check DHT health
+	routingTableSize := c.dht.RoutingTable().Size()
+	fmt.Printf("\nDHT routing table size: %d\n", routingTableSize)
+
+	fmt.Println("\n💡 For same-network connections:")
+	fmt.Println("   1. Make sure both peers are connected to libp2p first")
+	fmt.Println("   2. WebRTC should work directly without TURN servers")
+	fmt.Println("   3. Use 'peers' command to see connected peers")
+	fmt.Println("   4. Use 'connect <multiaddr>' to manually connect")
+
+	fmt.Println("\nDiagnostics complete.")
 }
 
 func (c *Client) performLocalWebRTCTest() {
-	// This functionality is for debugging and has been removed from the user-facing commands
-	fmt.Println("Local WebRTC testing is an internal function.")
+	fmt.Println("\n=== Local Network WebRTC Test ===")
+
+	// Create a simple WebRTC peer for testing
+	testPeer, err := webRTC.NewSimpleWebRTCPeer(func(msg webrtc.DataChannelMessage, peer *webRTC.SimpleWebRTCPeer) {
+		log.Printf("Test received message: %s", string(msg.Data))
+	})
+	if err != nil {
+		fmt.Printf("❌ Failed to create test WebRTC peer: %v\n", err)
+		return
+	}
+	defer testPeer.Close()
+
+	// Try to create an offer to test the process
+	offer, err := testPeer.CreateOffer()
+	if err != nil {
+		fmt.Printf("❌ Failed to create WebRTC offer: %v\n", err)
+		return
+	}
+
+	fmt.Printf("✅ WebRTC offer created successfully (length: %d chars)\n", len(offer))
+
+	// Try to wait for ICE gathering
+	fmt.Println("Waiting 5 seconds for ICE candidate gathering...")
+	time.Sleep(5 * time.Second)
+
+	fmt.Println("✅ Local WebRTC test completed - basic functionality working")
+	fmt.Println("If downloads still fail, the issue is likely in the peer-to-peer signaling")
 }
 
 func (c *Client) addFile(filePath string) error {
@@ -378,17 +481,19 @@ func (c *Client) addFile(filePath string) error {
 		PieceSz:  pieceSz,
 	}
 
-	fmt.Printf("Sharing '%s' (%s)\n", info.Name(), humanize.Bytes(uint64(info.Size())))
-	fmt.Printf("CID: %s\n", fileCID.String())
+	log.Printf("Announcing file %s with CID %s to DHT...", info.Name(), fileCID.String())
+	provideCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err := c.dht.Provide(provideCtx, fileCID, true); err != nil {
+		log.Printf(" - Warning: Failed to announce to DHT: %v", err)
+	} else {
+		log.Println(" - Successfully announced file to DHT")
+	}
 
-	go func() {
-		provideCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if err := c.dht.Provide(provideCtx, fileCID, true); err != nil {
-			log.Printf("Failed to announce file to DHT: %v", err)
-		}
-	}()
-
+	fmt.Printf("✓ File '%s' is now being shared\n", info.Name())
+	fmt.Printf(" CID: %s\n", fileCID.String())
+	fmt.Printf(" Hash: %s\n", fileHashStr)
+	fmt.Printf(" Size: %s\n", humanize.Bytes(uint64(info.Size())))
 	return nil
 }
 
@@ -400,13 +505,16 @@ func (c *Client) listLocalFiles() {
 		return
 	}
 	if len(files) == 0 {
-		fmt.Println("You are not sharing any files.")
+		fmt.Println(" - No files being shared.")
 		return
 	}
-	fmt.Println("\n=== Shared Files ===")
+	fmt.Println("\n=== Your Shared Files ===")
 	for _, file := range files {
-		fmt.Printf("- %s (%s)\n", file.Filename, humanize.Bytes(uint64(file.FileSize)))
-		fmt.Printf("  CID: %s\n", file.CID)
+		fmt.Printf("Name: %s\n", file.Filename)
+		fmt.Printf(" CID: %s\n", file.CID)
+		fmt.Printf(" Size: %s\n", humanize.Bytes(uint64(file.FileSize)))
+		fmt.Printf(" Path: %s\n", file.FilePath)
+		fmt.Println(" ---")
 	}
 }
 
@@ -417,12 +525,14 @@ func (c *Client) searchByText(q string) error {
 		return err
 	}
 	if len(matches) == 0 {
-		fmt.Printf("No local files found matching '%s'.\n", q)
+		fmt.Printf("Searching for files containing '%s'...\n", q)
+		fmt.Println("Note: Direct filename search requires content indexing.")
+		fmt.Println("Try using the CID if you have it, or check with known peers.")
 		return nil
 	}
-	fmt.Printf("Found %d local match(es) for '%s':\n", len(matches), q)
+	fmt.Printf("Local index matches for '%s':\n", q)
 	for _, m := range matches {
-		fmt.Printf("- %s (CID: %s)\n", m.Filename, m.CID)
+		fmt.Printf("- %s  CID:%s\n", m.Filename, m.CID)
 	}
 	return nil
 }
@@ -432,24 +542,30 @@ func (c *Client) enhancedSearchByCID(cidStr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid CID: %w", err)
 	}
-	fmt.Printf("Searching for providers of %s...\n", fileCID.String())
-	providers, err := c.findProvidersWithTimeout(fileCID, 30*time.Second, MaxProviders)
+	fmt.Printf("Searching for CID: %s\n", fileCID.String())
+	providers, err := c.findProvidersWithTimeout(fileCID, 60*time.Second, MaxProviders)
 	if err != nil {
 		return fmt.Errorf("provider search failed: %w", err)
 	}
 
 	if len(providers) == 0 {
-		fmt.Println("No providers found.")
+		fmt.Println("No providers found for this CID")
+		fmt.Println("This could mean:")
+		fmt.Println(" - The file is not being shared")
+		fmt.Println(" - The provider is offline")
+		fmt.Println(" - Network connectivity issues")
+		fmt.Println(" - DHT routing problems")
 		return nil
 	}
 
 	fmt.Printf("Found %d provider(s):\n", len(providers))
 	for i, provider := range providers {
-		status := "Not connected"
+		fmt.Printf(" %d. %s\n", i+1, provider.ID)
 		if c.host.Network().Connectedness(provider.ID) == network.Connected {
-			status = "Connected"
+			fmt.Printf(" - Already connected\n")
+		} else {
+			fmt.Printf(" - Not connected\n")
 		}
-		fmt.Printf("  %d. %s (%s)\n", i+1, provider.ID, status)
 	}
 	return nil
 }
@@ -459,14 +575,29 @@ func (c *Client) findProvidersWithTimeout(id cid.Cid, timeout time.Duration, max
 	defer cancel()
 	providersChan := c.dht.FindProvidersAsync(ctx, id, maxProviders)
 	var providers []peer.AddrInfo
+	var totalFound int
 
-	for provider := range providersChan {
-		if provider.ID != c.host.ID() {
-			providers = append(providers, provider)
-			if len(providers) >= maxProviders {
-				break
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for provider := range providersChan {
+			totalFound++
+			if provider.ID != c.host.ID() {
+				providers = append(providers, provider)
+				fmt.Printf(" - Found provider %d: %s\n", len(providers), provider.ID)
+				if len(providers) >= maxProviders {
+					break
+				}
 			}
 		}
+	}()
+
+	select {
+	case <-done:
+		fmt.Printf("Provider search completed. Found %d total providers, %d unique external providers\n",
+			totalFound, len(providers))
+	case <-time.After(timeout):
+		fmt.Printf("Provider search timed out. Found %d providers so far\n", len(providers))
 	}
 
 	return providers, nil
@@ -483,17 +614,19 @@ func (c *Client) connectToPeer(multiaddrStr string) error {
 		return fmt.Errorf("failed to parse peer info: %w", err)
 	}
 
-	fmt.Printf("Connecting to %s...\n", peerInfo.ID)
+	fmt.Printf("Attempting to connect to peer %s...\n", peerInfo.ID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	if err := c.host.Connect(ctx, *peerInfo); err != nil {
-		return fmt.Errorf("connection failed: %w", err)
+		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	fmt.Printf("Successfully connected to %s.\n", peerInfo.ID)
+	fmt.Printf(" - Successfully connected to peer %s\n", peerInfo.ID)
+
 	c.host.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, time.Hour)
+
 	return nil
 }
 
@@ -501,9 +634,10 @@ func (c *Client) listConnectedPeers() {
 	peers := c.host.Network().Peers()
 	fmt.Printf("\n=== Connected Peers (%d) ===\n", len(peers))
 	for _, peerID := range peers {
-		conns := c.host.Network().ConnsToPeer(peerID)
-		if len(conns) > 0 {
-			fmt.Printf("- %s (%s)\n", peerID, conns[0].RemoteMultiaddr())
+		conn := c.host.Network().ConnsToPeer(peerID)
+		if len(conn) > 0 {
+			fmt.Printf("Peer: %s\n", peerID)
+			fmt.Printf(" Address: %s\n", conn[0].RemoteMultiaddr())
 		}
 	}
 }
@@ -517,7 +651,7 @@ func (c *Client) downloadFile(cidStr string) error {
 		return fmt.Errorf("invalid CID: %w", err)
 	}
 
-	fmt.Printf("Searching for providers of %s...\n", fileCID.String())
+	fmt.Printf("Looking for providers of CID: %s\n", fileCID.String())
 	providers, err := c.findProvidersWithTimeout(fileCID, 60*time.Second, MaxProviders)
 	if err != nil {
 		return fmt.Errorf("provider search failed: %w", err)
@@ -527,7 +661,7 @@ func (c *Client) downloadFile(cidStr string) error {
 		return fmt.Errorf("no providers found")
 	}
 
-	fmt.Printf("Found %d provider(s). Requesting file info...\n", len(providers))
+	fmt.Printf("Found %d providers. Getting file manifest...\n", len(providers))
 
 	var manifest controlMessage
 	var firstPeer *webRTC.SimpleWebRTCPeer
@@ -544,13 +678,13 @@ func (c *Client) downloadFile(cidStr string) error {
 	}
 
 	if firstPeer == nil {
-		return fmt.Errorf("failed to get file info from any provider")
+		return fmt.Errorf("failed to connect to any provider to get manifest")
 	}
 
 	// Store pieces in the database
 	for _, piece := range manifest.Pieces {
 		if err := c.db.UpsertPiece(ctx, cidStr, piece.Index, piece.Offset, piece.Size, piece.Hash, false); err != nil {
-			log.Printf("Failed to store piece info: %v", err)
+			log.Printf("Failed to store piece info for download: %v", err)
 		}
 	}
 
@@ -564,7 +698,7 @@ func (c *Client) downloadFile(cidStr string) error {
 
 	pieces, _ := c.db.GetPieces(ctx, cidStr)
 	if len(pieces) == 0 {
-		return fmt.Errorf("failed to retrieve piece info after manifest")
+		return fmt.Errorf("failed to retrieve piece information after receiving manifest")
 	}
 
 	state := &DownloadState{
@@ -573,7 +707,7 @@ func (c *Client) downloadFile(cidStr string) error {
 		TotalPieces:     int(manifest.NumPieces),
 		Pieces:          pieces,
 		Completed:       make(chan bool, 1),
-		Progress:        progressbar.DefaultBytes(manifest.TotalSize, "Downloading"),
+		Progress:        progressbar.DefaultBytes(manifest.TotalSize, "downloading..."),
 		PieceStatus:     make([]bool, int(manifest.NumPieces)),
 		PieceAssignees:  make(map[int]peer.ID),
 		pieceBuffers:    make(map[int][][]byte),
@@ -602,13 +736,13 @@ func (c *Client) downloadFile(cidStr string) error {
 		go func(peerInfo peer.AddrInfo, startPiece, endPiece int) {
 			defer wg.Done()
 			var peerConn *webRTC.SimpleWebRTCPeer
-			if peerInfo.ID == firstPeer.GetSignalingStream().Conn().RemotePeer() {
+			if peerInfo.ID.String() == firstPeer.GetSignalingStream().Conn().RemotePeer().String() {
 				peerConn = firstPeer
 			} else {
 				var connErr error
 				peerConn, connErr = c.initiateWebRTCConnectionWithRetry(peerInfo.ID, 2)
 				if connErr != nil {
-					log.Printf("Failed to connect to %s: %v", peerInfo.ID, connErr)
+					log.Printf("Failed to connect to peer %s for chunk download: %v", peerInfo.ID, connErr)
 					return
 				}
 				defer peerConn.Close()
@@ -621,22 +755,21 @@ func (c *Client) downloadFile(cidStr string) error {
 	localFile.Close()
 
 	if err := os.Rename(downloadPath, finalPath); err != nil {
-		return fmt.Errorf("failed to rename downloaded file: %w", err)
+		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
-	fmt.Printf("\nDownload complete: %s\n", finalPath)
+	fmt.Printf("\nDownload complete. File saved as %s\n", finalPath)
 	return nil
 }
 
 func (c *Client) downloadChunksFromPeer(peer *webRTC.SimpleWebRTCPeer, state *DownloadState, startPiece, endPiece int) {
-	remotePeerID := peer.GetSignalingStream().Conn().RemotePeer()
 	for i := startPiece; i < endPiece; i++ {
 		state.mu.Lock()
 		if state.PieceStatus[i] {
 			state.mu.Unlock()
 			continue
 		}
-		state.PieceAssignees[i] = remotePeerID
+		state.PieceAssignees[i] = peer.GetSignalingStream().Conn().RemotePeer()
 		state.mu.Unlock()
 
 		req := controlMessage{
@@ -646,7 +779,7 @@ func (c *Client) downloadChunksFromPeer(peer *webRTC.SimpleWebRTCPeer, state *Do
 		}
 
 		if err := peer.SendJSON(req); err != nil {
-			log.Printf("Failed to request piece %d from %s: %v", i, remotePeerID, err)
+			log.Printf("Failed to request piece %d from %s: %v", i, peer.GetSignalingStream().Conn().RemotePeer(), err)
 			return
 		}
 	}
@@ -681,17 +814,38 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			fmt.Printf("Retrying in %v (attempt %d/%d)...\n", backoff, attempt, maxRetries)
+			time.Sleep(backoff)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		if c.host.Network().Connectedness(targetPeerID) != network.Connected {
-			if err := c.host.Connect(ctx, peer.AddrInfo{ID: targetPeerID}); err != nil {
-				lastErr = fmt.Errorf("failed to connect to %s: %w", targetPeerID, err)
+		info := peer.AddrInfo{ID: targetPeerID}
+		if pinfo, err := c.dht.FindPeer(ctx, targetPeerID); err == nil && len(pinfo.Addrs) > 0 {
+			info = pinfo
+		} else {
+			lastErr = fmt.Errorf("dht lookup failed: %w", err)
+			continue
+		}
+
+		if len(info.Addrs) == 0 {
+			lastErr = fmt.Errorf("peer %s has no known multiaddrs", targetPeerID)
+			continue
+		}
+
+		c.host.Peerstore().AddAddrs(info.ID, info.Addrs, time.Hour)
+
+		if c.host.Network().Connectedness(info.ID) != network.Connected {
+			connectCtx, connectCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			err := c.host.Connect(connectCtx, info)
+			connectCancel()
+			if err != nil {
+				lastErr = fmt.Errorf("failed to connect to peer %s: %w", info.ID, err)
 				continue
 			}
+			time.Sleep(1 * time.Second)
 		}
 
 		webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage)
@@ -736,12 +890,12 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 
 		if answerMsg["type"] == "error" {
 			webrtcPeer.Close()
-			lastErr = fmt.Errorf("peer returned an error: %s", answerMsg["data"])
+			lastErr = fmt.Errorf("peer returned error: %s", answerMsg["data"])
 			continue
 		}
 		if answerMsg["type"] != "answer" {
 			webrtcPeer.Close()
-			lastErr = fmt.Errorf("expected 'answer', got '%s'", answerMsg["type"])
+			lastErr = fmt.Errorf("expected answer, got: %s", answerMsg["type"])
 			continue
 		}
 
@@ -751,12 +905,13 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			continue
 		}
 
-		if err := webrtcPeer.WaitForConnection(30 * time.Second); err != nil {
+		if err := webrtcPeer.WaitForConnection(90 * time.Second); err != nil {
 			webrtcPeer.Close()
 			lastErr = fmt.Errorf("WebRTC connection failed: %w", err)
 			continue
 		}
 
+		fmt.Printf("WebRTC connection established with %s\n", targetPeerID)
 		c.peersMux.Lock()
 		c.webRTCPeers[targetPeerID] = webrtcPeer
 		c.peersMux.Unlock()
@@ -765,6 +920,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 	}
 	return nil, lastErr
 }
+
 func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream) (string, error) {
 	peerID, err := peer.Decode(remotePeerID)
 	if err != nil {
@@ -792,15 +948,17 @@ func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream)
 
 func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRTC.SimpleWebRTCPeer) {
 	if !msg.IsString {
-		log.Println("Received unexpected binary message, expecting JSON")
+		log.Printf("Received unexpected binary message, expecting JSON.")
 		return
 	}
 
 	var ctrl controlMessage
 	if err := json.Unmarshal(msg.Data, &ctrl); err != nil {
 		var ping map[string]string
-		if json.Unmarshal(msg.Data, &ping) == nil && ping["type"] == "ping" {
-			return // Ignore keep-alive pings
+		if err2 := json.Unmarshal(msg.Data, &ping); err2 == nil {
+			if ping["type"] == "ping" {
+				return // Ignore pings
+			}
 		}
 		log.Printf("Failed to unmarshal control message: %v", err)
 		return
@@ -823,16 +981,18 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.SimpleWe
 		go c.handlePieceRequest(ctx, ctrl, peer)
 	case "PIECE_CHUNK":
 		c.handlePieceChunk(ctrl)
+
 	default:
-		log.Printf("Unknown command received: %s", ctrl.Command)
+		log.Printf("Unknown control command: %s", ctrl.Command)
 	}
 }
+
 func (c *Client) handlePieceChunk(ctrl controlMessage) {
 	c.downloadsMux.RLock()
 	state, ok := c.activeDownloads[ctrl.CID]
 	c.downloadsMux.RUnlock()
 	if !ok {
-		return // Download is no longer active
+		return
 	}
 
 	state.mu.Lock()
@@ -867,21 +1027,25 @@ func (c *Client) handlePieceChunk(ctrl controlMessage) {
 	}
 
 	if isComplete {
+		// Reassemble and write piece
 		pieceData := make([]byte, 0, pieceSize)
 		for _, chunk := range state.pieceBuffers[int(ctrl.Index)] {
 			pieceData = append(pieceData, chunk...)
 		}
 
+		// Verify piece hash
 		h := sha256.New()
 		h.Write(pieceData)
-		if hex.EncodeToString(h.Sum(nil)) != state.Pieces[ctrl.Index].Hash {
-			log.Printf("Piece %d hash mismatch, retrying...", ctrl.Index)
-			state.pieceBuffers[int(ctrl.Index)] = nil // Clear buffer to re-download
+		hash := hex.EncodeToString(h.Sum(nil))
+
+		if hash != state.Pieces[ctrl.Index].Hash {
+			log.Printf("Piece %d hash mismatch", ctrl.Index)
+			state.pieceBuffers[int(ctrl.Index)] = nil // Clear buffer to retry
 			return
 		}
 
 		if _, err := state.File.WriteAt(pieceData, state.Pieces[ctrl.Index].Offset); err != nil {
-			log.Printf("Failed to write piece %d: %v", ctrl.Index, err)
+			log.Printf("Failed to write piece %d to file: %v", ctrl.Index, err)
 			return
 		}
 
@@ -898,7 +1062,7 @@ func (c *Client) handlePieceChunk(ctrl controlMessage) {
 func (c *Client) handlePieceRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
 	pieces, err := c.db.GetPieces(ctx, ctrl.CID)
 	if err != nil || int(ctrl.Index) >= len(pieces) {
-		log.Printf("Invalid piece request: CID %s, index %d", ctrl.CID, ctrl.Index)
+		log.Printf("Invalid piece request for CID %s, index %d", ctrl.CID, ctrl.Index)
 		return
 	}
 
@@ -917,7 +1081,8 @@ func (c *Client) handlePieceRequest(ctx context.Context, ctrl controlMessage, pe
 
 	piece := pieces[ctrl.Index]
 	pieceBuffer := make([]byte, piece.Size)
-	if _, err := file.ReadAt(pieceBuffer, piece.Offset); err != nil {
+	_, err = file.ReadAt(pieceBuffer, piece.Offset)
+	if err != nil {
 		log.Printf("Failed to read piece %d: %v", ctrl.Index, err)
 		return
 	}
@@ -945,16 +1110,17 @@ func (c *Client) handlePieceRequest(ctx context.Context, ctrl controlMessage, pe
 		}
 	}
 }
+
 func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
 	localFile, err := c.db.GetLocalFileByCID(ctx, ctrl.CID)
 	if err != nil {
-		log.Printf("Manifest request for unknown file: %s", ctrl.CID)
+		log.Printf("File not found for manifest: %s", ctrl.CID)
 		return
 	}
 
 	pieces, err := c.db.GetPieces(ctx, ctrl.CID)
 	if err != nil {
-		log.Printf("Failed to get pieces for manifest: %v", err)
+		log.Printf("Error getting pieces: %v", err)
 		return
 	}
 
@@ -969,12 +1135,12 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 	}
 
 	if err := peer.SendJSON(manifest); err != nil {
-		log.Printf("Failed to send manifest: %v", err)
+		log.Printf("Error sending manifest: %v", err)
 	}
 }
 
 func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
-	// This function is deprecated and should not be called
+	log.Printf("Note: handleFileRequest is deprecated in favor of piece-based transfers.")
 }
 
 func min64(a, b int64) int64 {
