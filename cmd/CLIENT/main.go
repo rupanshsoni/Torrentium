@@ -554,7 +554,7 @@ func (c *Client) enhancedSearchByCID(cidStr string) error {
 		fmt.Println(" - The file is not being shared")
 		fmt.Println(" - The provider is offline")
 		fmt.Println(" - Network connectivity issues")
-		fmt.Println(" - DHT routing problems")
+		fmt.Println(" - DHT routing problem")
 		return nil
 	}
 
