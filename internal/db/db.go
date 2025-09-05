@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
+	//"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -55,6 +56,7 @@ type PeerScore struct {
 
 type Repository struct {
 	DB *sql.DB
+	mu sync.Mutex
 }
 
 func NewRepository(db *sql.DB) *Repository { return &Repository{DB: db} }
@@ -62,9 +64,6 @@ func NewRepository(db *sql.DB) *Repository { return &Repository{DB: db} }
 var DB *sql.DB
 
 func InitDB() *sql.DB {
-	if err := godotenv.Load(); err != nil {
-		log.Printf("Warning: Could not load .env file: %v", err)
-	}
 	dbpath := os.Getenv("SQLITE_DB_PATH")
 	if dbpath == "" {
 		dbpath = "./peer.db"
@@ -137,6 +136,8 @@ func createTables(db *sql.DB) error {
 }
 
 func (r *Repository) AddLocalFile(ctx context.Context, cid, filename string, fileSize int64, filePath, fileHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	q := `INSERT INTO local_files (id, cid, filename, file_size, file_path, file_hash, created_at)
 	      VALUES (?, ?, ?, ?, ?, ?, ?)
 	      ON CONFLICT(cid) DO UPDATE SET filename=excluded.filename, file_path=excluded.file_path, file_size=excluded.file_size, file_hash=excluded.file_hash`
@@ -153,6 +154,8 @@ func (r *Repository) AddLocalFile(ctx context.Context, cid, filename string, fil
 }
 
 func (r *Repository) GetLocalFiles(ctx context.Context) ([]LocalFile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	rows, err := r.DB.QueryContext(ctx, `SELECT id, cid, filename, file_size, file_path, file_hash, created_at FROM local_files ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -170,6 +173,8 @@ func (r *Repository) GetLocalFiles(ctx context.Context) ([]LocalFile, error) {
 }
 
 func (r *Repository) GetLocalFileByCID(ctx context.Context, cid string) (*LocalFile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var f LocalFile
 	err := r.DB.QueryRowContext(ctx, `SELECT id, cid, filename, file_size, file_path, file_hash, created_at FROM local_files WHERE cid = ?`, cid).
 		Scan(&f.ID, &f.CID, &f.Filename, &f.FileSize, &f.FilePath, &f.FileHash, &f.CreatedAt)
@@ -180,11 +185,15 @@ func (r *Repository) GetLocalFileByCID(ctx context.Context, cid string) (*LocalF
 }
 
 func (r *Repository) DeleteLocalFile(ctx context.Context, cid string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	_, err := r.DB.ExecContext(ctx, `DELETE FROM local_files WHERE cid=?`, cid)
 	return err
 }
 
 func (r *Repository) AddDownload(ctx context.Context, cid, filename string, fileSize int64, downloadPath string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	_, err := r.DB.ExecContext(ctx, `INSERT INTO downloads (id, cid, filename, file_size, download_path, downloaded_at, status)
 		VALUES (?, ?, ?, ?, ?, ?, 'completed') ON CONFLICT(cid) DO UPDATE SET status='completed', downloaded_at=excluded.downloaded_at, download_path=excluded.download_path`,
 		uuid.New().String(), cid, filename, fileSize, downloadPath, time.Now())
@@ -192,6 +201,8 @@ func (r *Repository) AddDownload(ctx context.Context, cid, filename string, file
 }
 
 func (r *Repository) UpsertPiece(ctx context.Context, cid string, idx int64, offset, size int64, hash string, have bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	_, err := r.DB.ExecContext(ctx, `INSERT INTO pieces (id, cid, idx, offset, size, hash, have, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cid, idx) DO UPDATE SET have=excluded.have, updated_at=excluded.updated_at`,
@@ -200,6 +211,8 @@ func (r *Repository) UpsertPiece(ctx context.Context, cid string, idx int64, off
 }
 
 func (r *Repository) GetPieces(ctx context.Context, cid string) ([]Piece, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	rows, err := r.DB.QueryContext(ctx, `SELECT id, cid, idx, offset, size, hash, have, updated_at FROM pieces WHERE cid=? ORDER BY idx ASC`, cid)
 	if err != nil {
 		return nil, err
@@ -219,6 +232,8 @@ func (r *Repository) GetPieces(ctx context.Context, cid string) ([]Piece, error)
 }
 
 func (r *Repository) MissingPieces(ctx context.Context, cid string) ([]Piece, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	rows, err := r.DB.QueryContext(ctx, `SELECT id, cid, idx, offset, size, hash, have, updated_at FROM pieces WHERE cid=? AND have=0 ORDER BY idx ASC`, cid)
 	if err != nil {
 		return nil, err
@@ -238,6 +253,8 @@ func (r *Repository) MissingPieces(ctx context.Context, cid string) ([]Piece, er
 }
 
 func (r *Repository) SetPeerScore(ctx context.Context, peerID string, delta float64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -268,6 +285,8 @@ func (r *Repository) SetPeerScore(ctx context.Context, peerID string, delta floa
 }
 
 func (r *Repository) GetPeerScore(ctx context.Context, peerID string) (float64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var s float64
 	err := r.DB.QueryRowContext(ctx, `SELECT score FROM peer_scores WHERE peer_id=?`, peerID).Scan(&s)
 	if err != nil {
@@ -280,6 +299,8 @@ func (r *Repository) GetPeerScore(ctx context.Context, peerID string) (float64, 
 }
 
 func (r *Repository) SearchByFilename(ctx context.Context, q string) ([]LocalFile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	rows, err := r.DB.QueryContext(ctx, `SELECT cid, filename, file_size, '' as file_path, '' as file_hash, CURRENT_TIMESTAMP FROM metadata_index WHERE filename LIKE ? ORDER BY filename`, "%"+q+"%")
 	if err != nil {
 		return nil, err
@@ -296,4 +317,9 @@ func (r *Repository) SearchByFilename(ctx context.Context, q string) ([]LocalFil
 	return res, rows.Err()
 }
 
-func boolToInt(b bool) int { if b { return 1 }; return 0 }
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
