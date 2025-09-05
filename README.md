@@ -1,92 +1,93 @@
-# Torrentium - Decentralized P2P File Sharing System
+# Torrentium
 
-[![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org/doc/install)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+**Decentralized P2P File Sharing System built in Go**
 
-## Overview
+Torrentium is a fully decentralized peer-to-peer file sharing client. It uses libp2p's Distributed Hash Table (DHT) for peer discovery and WebRTC for direct file transfers, eliminating the need for centralized trackers.
 
-Torrentium is a **fully decentralized peer-to-peer file sharing system** built in Go that eliminates the need for centralized tracking servers. Unlike traditional BitTorrent systems that rely on trackers, Torrentium uses **libp2p's Distributed Hash Table (DHT)** for peer discovery and **WebRTC** for direct peer-to-peer data transfer.
+## Features
 
-## 🌟 Key Features
+- **Decentralized peer discovery** (libp2p Kademlia DHT)
+- **Direct file transfer** via WebRTC data channels
+- **Content-addressable storage** (IPFS CIDs)
+- **Chunked file transfer** with resume capability
+- **SHA-256 integrity verification**
+- **SQLite-based local database** for metadata and history
+- **Peer reputation scoring**
+- **CLI interface** for file sharing and management
 
-### Decentralized Architecture
-- **No central servers required** - fully peer-to-peer operation
-- **DHT-based peer discovery** using Kademlia algorithm via libp2p
-- **Resilient network topology** - no single point of failure
-- **Automatic relay functionality** for NAT traversal
-
-### Advanced Connectivity
-- **WebRTC data channels** for high-performance direct peer communication
-- **Multiple STUN/TURN servers** for reliable NAT traversal
-- **Automatic bootstrapping** to public IPFS nodes
-- **Connection health monitoring** and automatic recovery
-
-### File Management
-- **Content-addressable storage** using IPFS CIDs (Content Identifiers)
-- **Chunked file transfer** with configurable piece sizes (default: 1MB)
-- **Resume capability** through piece-based downloads
-- **SHA-256 integrity verification** for all file transfers
-- **Progress tracking** with visual progress bars
-
-### Local Database
-- **SQLite-based persistence** for metadata and download history
-- **Peer reputation system** with scoring mechanism
-- **File indexing** for fast local searches
-- **Download resume state** tracking
-
-## 🏗️ Architecture
-
-### Core Components
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Client App    │    │   libp2p Host   │    │   SQLite DB     │
-│                 │    │                 │    │                 │
-│ • CLI Interface │◄──►│ • DHT Discovery │◄──►│ • File Metadata │
-│ • File Manager  │    │ • Signaling     │    │ • Peer Scores   │
-│ • Download      │    │ • NAT Traversal │    │ • Download State│
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    WebRTC Data Channels                        │
-│              Direct P2P File Transfer Layer                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Network Stack
-1. **Transport Layer**: TCP/WebSocket for libp2p communication
-2. **P2P Layer**: libp2p for peer discovery and connection management
-3. **DHT Layer**: Kademlia DHT for content and peer routing
-4. **Data Layer**: WebRTC data channels for file transfer
-5. **Application Layer**: CLI interface and file management
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
-- **Go 1.23+** installed on your system
-- **Internet connection** for DHT bootstrapping
-- **Available TCP ports** for P2P communication
+
+- Go 1.23+
+- Internet connection
 
 ### Installation
 
-1. **Clone the repository**:
 ```bash
 git clone https://github.com/ArunCS1005/Torrentium.git
 cd Torrentium
-```
-
-2. **Install dependencies**:
-```bash
 go mod tidy
-```
-
-3. **Build the client**:
-```bash
 go build -o torrentium ./cmd/client/
 ```
 
-4. **Run the client**:
+### Usage
+
+```bash
+./torrentium
+```
+
+#### Example CLI Commands
+
+- `add /path/to/file.txt` — Share a file
+- `list` — List shared files
+- `search "filename"` — Search local index
+- `search <CID>` — Search by CID
+- `download <CID>` — Download a file
+- `peers` — List connected peers
+- `health` — Show network health
+
+## Architecture
+
+- **Transport:** TCP/WebSocket (libp2p)
+- **Discovery:** Kademlia DHT
+- **Transfer:** WebRTC data channels
+- **Storage:** SQLite database
+
+```
+Client App ── libp2p Host ── SQLite DB
+      │           │             │
+      ▼           ▼             ▼
+      └───── WebRTC Data Channels ─────┘
+```
+
+## Database Schema
+
+- `local_files`: Shared file metadata
+- `downloads`: Download history
+- `pieces`: Chunk-level tracking
+- `peer_scores`: Peer reputation
+
+## Contributing
+
+1. Fork the repo
+2. Create a feature branch
+3. Commit and push your changes
+4. Open a Pull Request
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
+
+## Support
+
+- [GitHub Issues](https://github.com/ArunCS1005/Torrentium/issues)
+- [Discussions](https://github.com/ArunCS1005/Torrentium/discussions)
+
+---
+
+Empowering decentralized file sharing for the modern web. 4. **Run the client**:
+
 ```bash
 ./torrentium
 ```
@@ -94,6 +95,7 @@ go build -o torrentium ./cmd/client/
 ### Configuration
 
 Create a `.env` file in the project root for custom configuration:
+
 ```env
 SQLITE_DB_PATH=./custom_peer.db
 ```
@@ -105,6 +107,7 @@ SQLITE_DB_PATH=./custom_peer.db
 The CLI provides an interactive interface with the following commands:
 
 #### File Sharing
+
 ```
 > add /path/to/your/file.txt
 ✓ File 'file.txt' is now being shared
@@ -114,6 +117,7 @@ The CLI provides an interactive interface with the following commands:
 ```
 
 #### Listing Shared Files
+
 ```
 > list
 === Your Shared Files ===
@@ -124,6 +128,7 @@ Name: file.txt
 ```
 
 #### Searching for Files
+
 ```
 # Search by filename
 > search "document"
@@ -138,6 +143,7 @@ Found 3 provider(s):
 ```
 
 #### Downloading Files
+
 ```
 > download bafybeig...
 Looking for providers of CID: bafybeig...
@@ -147,6 +153,7 @@ Download complete!
 ```
 
 #### Network Management
+
 ```
 # View connected peers
 > peers
@@ -169,6 +176,7 @@ DHT routing table size: 45
 ### Advanced Features
 
 #### Manual File Announcement
+
 ```
 > announce bafybeig...
 Re-announcing CID bafybeig... to DHT...
@@ -176,6 +184,7 @@ Re-announcing CID bafybeig... to DHT...
 ```
 
 #### Debug Information
+
 ```
 > debug
 === Network Debug Info ===
@@ -193,7 +202,8 @@ Shared Files (3):
 
 ### File Processing Pipeline
 
-1. **File Addition**: 
+1. **File Addition**:
+
    - File is read and SHA-256 hash calculated
    - Content is chunked into 1MB pieces
    - Each piece hash is stored in SQLite
@@ -201,6 +211,7 @@ Shared Files (3):
    - File metadata announced to DHT
 
 2. **Peer Discovery**:
+
    - DHT lookup for content providers
    - Connection establishment via libp2p
    - WebRTC negotiation through signaling protocol
@@ -272,12 +283,14 @@ Torrentium uses WebRTC data channels for efficient peer-to-peer communication:
 ## 🔗 Dependencies
 
 ### Core Libraries
+
 - **[go-libp2p](https://github.com/libp2p/go-libp2p)**: P2P networking framework
 - **[go-libp2p-kad-dht](https://github.com/libp2p/go-libp2p-kad-dht)**: Kademlia DHT implementation
 - **[pion/webrtc](https://github.com/pion/webrtc)**: WebRTC implementation in Go
 - **[go-sqlite3](https://github.com/mattn/go-sqlite3)**: SQLite database driver
 
 ### Utility Libraries
+
 - **[go-cid](https://github.com/ipfs/go-cid)**: Content Identifier implementation
 - **[go-multihash](https://github.com/multiformats/go-multihash)**: Multihash support
 - **[progressbar](https://github.com/schollz/progressbar)**: CLI progress visualization
@@ -286,6 +299,7 @@ Torrentium uses WebRTC data channels for efficient peer-to-peer communication:
 ## 🛠️ Development
 
 ### Project Structure
+
 ```
 torrentium/
 ├── cmd/client/           # Main client application
@@ -353,6 +367,7 @@ go run ./cmd/client/
 4. **Connection timeouts**: Try restarting and allowing more time for bootstrapping
 
 ### Debug Mode
+
 Use the `debug` command to get detailed network information and diagnose connectivity issues.
 
 ## 📄 License
@@ -369,8 +384,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 For issues, questions, or contributions:
-- **GitHub Issues**: [Create an issue](https://github.com/ArunCS1005/Torrentium/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/ArunCS1005/Torrentium/discussions)
+
+- **GitHub Issues**: [Create an issue](https://github.com/devlup-labs/Torrentium)
+- **Discussions**: [GitHub Discussions](https://github.com/devlup-labs/Torrentium/discussions)
 
 ---
 

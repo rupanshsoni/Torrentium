@@ -1326,7 +1326,7 @@ func (c *Client) monitorCongestion() {
 	}
 }
 
-// New: handlePong
+
 func (c *Client) handlePong(pid peer.ID) {
 	if start, ok := c.pingTimes[pid]; ok {
 		rtt := time.Since(start)
