@@ -44,6 +44,7 @@ const (
 type SimpleWebRTCPeer struct {
 	pc              *webrtc.PeerConnection
 	dc              *webrtc.DataChannel
+	reliableDC      *webrtc.DataChannel
 	onMessage       func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer)
 	fileWriter      io.WriteCloser
 	writerMutex     sync.RWMutex
@@ -97,34 +98,52 @@ func (p *SimpleWebRTCPeer) setupConnectionHandlers() {
 
 	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		log.Printf("New DataChannel %s", dc.Label())
-		p.dc = dc
-		p.setupDataChannel()
+		if dc.Label() == "reliable" {
+			p.reliableDC = dc
+		} else {
+			p.dc = dc
+		}
+		p.setupDataChannel(dc)
 	})
 }
 
-func (p *SimpleWebRTCPeer) setupDataChannel() {
-	p.dc.OnOpen(func() {
-		log.Printf("Data channel '%s' opened", p.dc.Label())
+func (p *SimpleWebRTCPeer) setupDataChannel(dc *webrtc.DataChannel) {
+	dc.OnOpen(func() {
+		log.Printf("Data channel '%s' opened", dc.Label())
 		p.setConnectionState(ConnectionStateConnected)
 	})
 
-	p.dc.OnClose(func() {
-		log.Printf("Data channel '%s' closed", p.dc.Label())
+	dc.OnClose(func() {
+		log.Printf("Data channel '%s' closed", dc.Label())
 		p.setConnectionState(ConnectionStateClosed)
 	})
 
-	p.dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		p.onMessage(msg, p)
 	})
 }
 
 func (p *SimpleWebRTCPeer) CreateOffer() (string, error) {
+	// Create the unreliable data channel for file chunks
 	dc, err := p.pc.CreateDataChannel("data", nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create data channel: %w", err)
 	}
 	p.dc = dc
-	p.setupDataChannel()
+	p.setupDataChannel(p.dc)
+
+	// Create the reliable data channel for control messages
+	ordered := true
+	maxRetransmits := uint16(5)
+	reliableDC, err := p.pc.CreateDataChannel("reliable", &webrtc.DataChannelInit{
+		Ordered:        &ordered,
+		MaxRetransmits: &maxRetransmits,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create reliable data channel: %w", err)
+	}
+	p.reliableDC = reliableDC
+	p.setupDataChannel(p.reliableDC)
 
 	offer, err := p.pc.CreateOffer(nil)
 	if err != nil {
@@ -204,6 +223,17 @@ func (p *SimpleWebRTCPeer) SendJSON(v interface{}) error {
 	return p.dc.SendText(string(data))
 }
 
+func (p *SimpleWebRTCPeer) SendJSONReliable(v interface{}) error {
+	if p.reliableDC == nil || p.reliableDC.ReadyState() != webrtc.DataChannelStateOpen {
+		return fmt.Errorf("reliable data channel is not open")
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return p.reliableDC.SendText(string(data))
+}
+
 func (p *SimpleWebRTCPeer) SendRaw(data []byte) error {
 	if p.dc == nil || p.dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel is not open")
@@ -260,7 +290,7 @@ func (p *SimpleWebRTCPeer) WaitForConnection(timeout time.Duration) error {
 		case <-timer.C:
 			return fmt.Errorf("connection timeout")
 		case <-ticker.C:
-			if p.getConnectionState() == ConnectionStateConnected {
+			if p.GetConnectionState() == ConnectionStateConnected {
 				return nil
 			}
 		case <-p.closeCh:
@@ -287,7 +317,7 @@ func (p *SimpleWebRTCPeer) setConnectionState(state ConnectionState) {
 	}
 }
 
-func (p *SimpleWebRTCPeer) getConnectionState() ConnectionState {
+func (p *SimpleWebRTCPeer) GetConnectionState() ConnectionState {
 	p.stateMux.RLock()
 	defer p.stateMux.RUnlock()
 	return p.state
