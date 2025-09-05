@@ -13,13 +13,32 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/multiformats/go-multiaddr"
+	relayv2client "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
 const privKeyFile = "private_key"
 
-// NewHost creates a new libp2p host with a Kademlia DHT.
+func reserveWithRelay(ctx context.Context, relayAddrStr string, h host.Host) error {
+	maddr, err := ma.NewMultiaddr(relayAddrStr)
+	if err != nil {
+		return fmt.Errorf("invalid relay multiaddr: %w", err)
+	}
+	relayInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		return fmt.Errorf("could not parse relay AddrInfo: %w", err)
+	}
+	if err := h.Connect(ctx, *relayInfo); err != nil {
+		return fmt.Errorf("failed to connect to relay: %w", err)
+	}
+	res, err := relayv2client.Reserve(ctx, h, *relayInfo)
+	if err != nil {
+		return fmt.Errorf("reservation failed: %w", err)
+	}
+	log.Printf("✅ Reservation with relay successful. Expires at: %v", res.Expiration)
+	return nil
+}
+
 func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, error) {
 	priv, err := loadOrGeneratePrivateKey()
 	if err != nil {
@@ -32,60 +51,68 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	}
 
 	var idht *dht.IpfsDHT
-	fmt.Println("debugging 11")
+	relayAddrStr := "/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWJeENaS7RuZLju4dGEZmK7ZJee4RMfBxo6aPfXBrWsuhw"
 
-	// Configure the static relay
-	relayAddr, err := multiaddr.NewMultiaddr("/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWDzR4XF65JtKrbQWG42QajS9ox2ptBwdRkQ7un6h7RAKQ")
+	// Prepare static relay info
+	relayMaddr, err := ma.NewMultiaddr(relayAddrStr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse relay address: %w", err)
+		return nil, nil, fmt.Errorf("invalid relay multiaddr: %w", err)
 	}
-	relayInfo, err := peer.AddrInfoFromP2pAddr(relayAddr)
+	relayInfo, err := peer.AddrInfoFromP2pAddr(relayMaddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get AddrInfo from relay address: %w", err)
+		return nil, nil, fmt.Errorf("invalid relay peer info: %w", err)
 	}
 
+	// Initialize libp2p host
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		// Enable local network optimizations
 		libp2p.EnableRelay(),
-		// Use the static relay as backup only
 		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*relayInfo}),
-		// Enable hole punching for better connectivity
 		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
-		panic(err)
+		log.Fatalf("libp2p peer not initialized: %v", err)
 	}
 
-	// Create DHT with reference to host `h`
+	// Optional: connect to relay (will be done by reservation anyway)
+	if err := h.Connect(ctx, *relayInfo); err != nil {
+		log.Fatalf("❌ Failed to connect to relay: %v", err)
+	}
+	log.Println("✅ Connected to relay")
+
+	// 🔐 Reserve relay slot (critical!)
+	if err := reserveWithRelay(ctx, relayAddrStr, h); err != nil {
+		log.Fatalf("❌ Relay reservation failed: %v", err)
+	}
+
+	// Init DHT
 	idht, err = dht.New(ctx, h)
 	if err != nil {
-		panic(err)
-	}
-	fmt.Println("debugging 14")
-
-	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to initialize DHT: %w", err)
 	}
 
-	// Bootstrap the DHT
 	if err := idht.Bootstrap(ctx); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
-	log.Printf("Host created with ID: %s", h.ID())
-	log.Printf("Host listening on: %s/p2p/%s", h.Addrs()[0], h.ID())
+	log.Printf("✅ Host created with ID: %s", h.ID())
+	for _, addr := range h.Addrs() {
+		log.Printf("🟢 Listening on: %s/p2p/%s", addr, h.ID())
+	}
+
 	return h, idht, nil
 }
 
 // Add these improvements to your main function and Client struct
-
+// domian name of relays ==>  https://relay-torrentium-9ztp.onrender.com
 // Improved bootstrapping function
 func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 	// Updated bootstrap nodes with more reliable addresses
 	bootstrapNodes := []string{
 		// Official IPFS bootstrap nodes (mix of DNS and direct IP)
+		// "/dns4/relay-torrentium-9ztp.onrender.com/tcp/433/ws/p2p/12D3KooWDzR4XF65JtKrbQWG42QajS9ox2ptBwdRkQ7un6h7RAKQ",
+
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VCk8JpNUQLoUPF3HfrDAQGS52a8",
@@ -112,7 +139,7 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 			break
 		}
 
-		addr, err := multiaddr.NewMultiaddr(addrStr)
+		addr, err := ma.NewMultiaddr(addrStr)
 		if err != nil {
 			log.Printf("Invalid bootstrap address %s: %v", addrStr, err)
 			continue

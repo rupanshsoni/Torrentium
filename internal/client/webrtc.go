@@ -43,6 +43,7 @@ const (
 )
 
 type SimpleWebRTCPeer struct {
+	ID              peer.ID
 	pc              *webrtc.PeerConnection
 	dc              *webrtc.DataChannel
 	reliableDC      *webrtc.DataChannel
@@ -218,6 +219,9 @@ func (p *SimpleWebRTCPeer) HandleAnswer(answerStr string) error {
 	return p.pc.SetRemoteDescription(answer)
 }
 
+// Checks if the WebRTC data channel is open
+// Converts any Go data (struct/map/slice/etc.) into JSON
+// Sends that JSON string to the other peer using WebRTC's data channel
 func (p *SimpleWebRTCPeer) SendJSON(v interface{}) error {
 	if p.dc == nil || p.dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel is not open")
