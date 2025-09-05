@@ -26,11 +26,12 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/pion/webrtc/v3"
+	"github.com/schollz/progressbar/v3"
+
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
-	"github.com/pion/webrtc/v3"
-	"github.com/schollz/progressbar/v3"
 )
 
 const (
@@ -422,6 +423,8 @@ func (c *Client) performLocalWebRTCTest() {
 	// Create a simple WebRTC peer for testing
 	testPeer, err := webRTC.NewSimpleWebRTCPeer(func(msg webrtc.DataChannelMessage, peer *webRTC.SimpleWebRTCPeer) {
 		log.Printf("Test received message: %s", string(msg.Data))
+	}, func(peerID peer.ID) {
+		// No-op for this test
 	})
 	if err != nil {
 		fmt.Printf("❌ Failed to create test WebRTC peer: %v\n", err)
@@ -908,7 +911,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			time.Sleep(1 * time.Second)
 		}
 
-		webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage)
+		webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage, c.onWebRTCPeerClose)
 		if err != nil {
 			lastErr = err
 			continue
@@ -987,7 +990,7 @@ func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream)
 		return "", fmt.Errorf("invalid peer ID: %w", err)
 	}
 
-	webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage)
+	webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage, c.onWebRTCPeerClose)
 	if err != nil {
 		return "", err
 	}
@@ -1012,7 +1015,10 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRT
 		log.Printf("Received unexpected binary message, expecting JSON.")
 		return
 	}
-
+	// Robustness: Handle empty messages that might be causing "Unknown control command: "
+	if len(msg.Data) == 0 {
+		return
+	}
 	var ctrl controlMessage
 	if err := json.Unmarshal(msg.Data, &ctrl); err != nil {
 		var ping map[string]string
@@ -1027,7 +1033,7 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRT
 				return
 			}
 		}
-		log.Printf("Failed to unmarshal control message: %v", err)
+		log.Printf("Failed to unmarshal control message: %v. Raw message: %s", err, string(msg.Data))
 		return
 	}
 	c.handleControlMessage(ctrl, peer)
@@ -1270,6 +1276,26 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 
 	if err := peer.SendJSONReliable(manifest); err != nil {
 		log.Printf("Error sending manifest: %v", err)
+	}
+}
+
+func (c *Client) onWebRTCPeerClose(peerID peer.ID) {
+	c.peersMux.Lock()
+	delete(c.webRTCPeers, peerID)
+	c.peersMux.Unlock()
+
+	// Handle download resumption logic
+	c.downloadsMux.Lock()
+	defer c.downloadsMux.Unlock()
+
+	for cid, state := range c.activeDownloads {
+		for pieceIndex, assignee := range state.PieceAssignees {
+			if assignee == peerID {
+				log.Printf("Peer %s disconnected, re-requesting piece %d for download %s", peerID, pieceIndex, cid)
+				// Re-queue the piece for download
+				go c.reRequestPiece(state, pieceIndex)
+			}
+		}
 	}
 }
 

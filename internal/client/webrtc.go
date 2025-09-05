@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -46,6 +47,7 @@ type SimpleWebRTCPeer struct {
 	dc              *webrtc.DataChannel
 	reliableDC      *webrtc.DataChannel
 	onMessage       func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer)
+	onCloseCallback func(peerID peer.ID) // New callback for when the connection closes
 	fileWriter      io.WriteCloser
 	writerMutex     sync.RWMutex
 	signalingStream network.Stream
@@ -57,17 +59,18 @@ type SimpleWebRTCPeer struct {
 	keepAliveTick   *time.Ticker
 }
 
-func NewSimpleWebRTCPeer(onMessage func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer)) (*SimpleWebRTCPeer, error) {
+func NewSimpleWebRTCPeer(onMessage func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer), onClose func(peerID peer.ID)) (*SimpleWebRTCPeer, error) {
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create peer connection: %w", err)
 	}
 
 	peer := &SimpleWebRTCPeer{
-		pc:        pc,
-		onMessage: onMessage,
-		closeCh:   make(chan struct{}),
-		state:     ConnectionStateNew,
+		pc:              pc,
+		onMessage:       onMessage,
+		onCloseCallback: onClose,
+		closeCh:         make(chan struct{}),
+		state:           ConnectionStateNew,
 	}
 
 	peer.setupConnectionHandlers()
@@ -82,10 +85,13 @@ func (p *SimpleWebRTCPeer) setupConnectionHandlers() {
 			p.setConnectionState(ConnectionStateConnected)
 		case webrtc.ICEConnectionStateDisconnected:
 			p.setConnectionState(ConnectionStateDisconnected)
+			// You can add automatic reconnection logic here if desired
 		case webrtc.ICEConnectionStateFailed:
 			p.setConnectionState(ConnectionStateFailed)
+			p.Close() // Close the connection on failure
 		case webrtc.ICEConnectionStateClosed:
 			p.setConnectionState(ConnectionStateClosed)
+			p.Close()
 		}
 	})
 
@@ -243,6 +249,9 @@ func (p *SimpleWebRTCPeer) SendRaw(data []byte) error {
 
 func (p *SimpleWebRTCPeer) Close() {
 	p.closeOnce.Do(func() {
+		if p.onCloseCallback != nil && p.signalingStream != nil {
+			p.onCloseCallback(p.signalingStream.Conn().RemotePeer())
+		}
 		p.stopKeepAlive()
 		if p.pc != nil {
 			p.pc.Close()
