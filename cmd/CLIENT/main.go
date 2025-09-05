@@ -27,6 +27,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	// "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
 	"github.com/pion/webrtc/v3"
@@ -69,6 +71,8 @@ type controlMessage struct {
 	PieceHash string `json:"piece_hash,omitempty"`
 	Index     int64  `json:"index,omitempty"`
 	Filename  string `json:"filename,omitempty"`
+	// Target    string `json:"filename,omitempty"`
+	// From      string `json:"filename,omitempty"`
 }
 
 type DownloadState struct {
@@ -658,19 +662,50 @@ func (c *Client) downloadFile(cidStr string) error {
 	}
 
 	fmt.Printf("Found %d providers. Getting file manifest...\n", len(providers))
+	relayAddrStr := "/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWJeENaS7RuZLju4dGEZmK7ZJee4RMfBxo6aPfXBrWsuhw"
 
-	// Get manifest from the first available peer
 	var manifest controlMessage
 	var firstPeer *webRTC.SimpleWebRTCPeer
+
 	for _, p := range providers {
+		// Try direct connection first
 		peerConn, err := c.initiateWebRTCConnectionWithRetry(p.ID, 1)
-		if err == nil {
-			firstPeer = peerConn
-			manifest, err = c.requestManifest(firstPeer, cidStr)
+		if err != nil {
+			// Fallback: relay connection
+			log.Println("🔁 Direct connection failed, trying relay...")
+
+			// Build circuit address
+			circuitStr := fmt.Sprintf("%s/p2p-circuit/p2p/%s", relayAddrStr, p.ID.String())
+			circuitMaddr, err := multiaddr.NewMultiaddr(circuitStr)
+			if err != nil {
+				log.Printf("Invalid circuit multiaddr: %v", err)
+				continue
+			}
+			targetInfo := peer.AddrInfo{ID: p.ID, Addrs: []multiaddr.Multiaddr{circuitMaddr}}
+
+			if err := c.host.Connect(ctx, targetInfo); err != nil {
+				log.Printf("❌ Relay dial failed: %v", err)
+				continue
+			}
+
+			log.Printf("✅ Relay dial to %s successful", p.ID)
+
+			// Now perform WebRTC handshake
+			peerConn, err = c.initiateWebRTCConnectionWithRetry(p.ID, 1)
+			if err != nil {
+				log.Printf("⚠️ WebRTC connection via relay failed: %v", err)
+				continue
+			}
+		}
+
+		// If WebRTC connected, fetch manifest
+		if peerConn != nil {
+			manifest, err = c.requestManifest(peerConn, cidStr)
 			if err == nil {
+				firstPeer = peerConn
 				break
 			}
-			firstPeer.Close()
+			peerConn.Close()
 		}
 	}
 
@@ -678,7 +713,7 @@ func (c *Client) downloadFile(cidStr string) error {
 		return fmt.Errorf("failed to connect to any provider to get manifest")
 	}
 
-	// Prepare download state
+	// Prepare for file download
 	downloadPath := fmt.Sprintf("%s.download", manifest.Filename)
 	finalPath := manifest.Filename
 	localFile, err := os.Create(downloadPath)
@@ -702,12 +737,12 @@ func (c *Client) downloadFile(cidStr string) error {
 	c.activeDownloads[cidStr] = state
 	c.downloadsMux.Unlock()
 
+	// Parallel downloads
 	var wg sync.WaitGroup
 	peersToUse := providers
 	if len(peersToUse) > MaxParallelDownloads {
 		peersToUse = peersToUse[:MaxParallelDownloads]
 	}
-
 	chunksPerPeer := state.TotalPieces / len(peersToUse)
 
 	for i, p := range peersToUse {
@@ -727,7 +762,7 @@ func (c *Client) downloadFile(cidStr string) error {
 				var connErr error
 				peerConn, connErr = c.initiateWebRTCConnectionWithRetry(peerInfo.ID, 2)
 				if connErr != nil {
-					log.Printf("Failed to connect to peer %s for chunk download: %v", peerInfo.ID, connErr)
+					log.Printf("Chunk peer connect failed: %v", connErr)
 					return
 				}
 				defer peerConn.Close()
@@ -739,12 +774,11 @@ func (c *Client) downloadFile(cidStr string) error {
 	wg.Wait()
 	localFile.Close()
 
-	// Finalize download
 	if err := os.Rename(downloadPath, finalPath); err != nil {
 		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
-	fmt.Printf("\nDownload complete. File saved as %s\n", finalPath)
+	fmt.Printf("\n✅ Download complete. File saved as %s\n", finalPath)
 	return nil
 }
 
@@ -807,13 +841,16 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 	} else {
 		log.Printf("ICE connectivity test passed")
 	}
+	log.Printf("debug 1")
 
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
+			log.Printf("debug 1.1")
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			fmt.Printf("Retrying in %v (attempt %d/%d)...\n", backoff, attempt, maxRetries)
 			time.Sleep(backoff)
+			log.Printf("debug 2")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -824,18 +861,22 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			info = pinfo
 			fmt.Printf("Found %d addresses via DHT\n", len(info.Addrs))
 		} else {
-			fmt.Printf("DHT lookup failed: %v. This could be a network issue or the peer may be offline.\n", err)
-			cancel()
-			continue
+			log.Printf("debug 3")
+			return nil, err
 		}
 		cancel()
+		log.Printf("debug 4")
 
 		if len(info.Addrs) == 0 {
+			log.Printf("debug 5")
 			lastErr = fmt.Errorf("peer %s has no known multiaddrs", targetPeerID)
 			continue
 		}
 
 		c.host.Peerstore().AddAddrs(info.ID, info.Addrs, time.Hour)
+		fmt.Println("relay ddebugging 1")
+		fmt.Println(c.host.Peerstore())
+		fmt.Println("relays debugging 2")
 
 		if c.host.Network().Connectedness(info.ID) != network.Connected {
 			fmt.Printf("Connecting to peer %s...\n", info.ID)
@@ -844,9 +885,11 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			err := c.host.Connect(connectCtx, info)
 			connectCancel()
 			if err != nil {
-				lastErr = fmt.Errorf("failed to connect to peer %s: %w", info.ID, err)
-				continue
+				log.Printf("failed to connect to peer %s: %w", info.ID, err)
+				fmt.Printf("DHT lookup failed: %v. This could be a network issue now trying connection using relays.\n", err)
+				return nil, err
 			}
+
 			fmt.Printf("Successfully connected to peer %s\n", info.ID)
 			// Shorter stabilization time for local network
 			time.Sleep(1 * time.Second)
@@ -855,14 +898,15 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 		webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage)
 		if err != nil {
 			lastErr = err
-			continue
+			return nil, err
+			// continue
 		}
 
 		offer, err := webrtcPeer.CreateOffer()
 		if err != nil {
 			webrtcPeer.Close()
 			lastErr = err
-			continue
+			return nil, err
 		}
 
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -871,7 +915,8 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 		if err != nil {
 			webrtcPeer.Close()
 			lastErr = err
-			continue
+			return nil, err
+			
 		}
 
 		webrtcPeer.SetSignalingStream(s)
@@ -1193,6 +1238,8 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 		HashHex:   localFile.FileHash,
 		NumPieces: int64(len(pieces)),
 		Filename:  localFile.Filename,
+		// From:      string(c.host.ID()),
+		// Target:    ctrl.From,
 	}
 
 	if err := peer.SendJSON(manifest); err != nil {
