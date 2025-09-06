@@ -41,7 +41,7 @@ const (
 	MaxProviders           = 10
 	MaxChunk               = 16 * 1024 // 16KiB chunks
 	MaxParallelDownloads   = 3
-	PieceTimeout           = 60 * time.Second // Timeout for downloading a single piece
+	PieceTimeout           = 300 * time.Second // Timeout for downloading a single piece
 	RetransmissionTimeout  = 5 * time.Second
 	KeepAliveInterval      = 15 * time.Second
 	PingInterval           = 10 * time.Second
@@ -78,22 +78,20 @@ type FileInfo struct {
 }
 
 type controlMessage struct {
-
-	Command     string      `json:"command"`
-	CID         string      `json:"cid,omitempty"`
-	PieceSize   int64       `json:"piece_size,omitempty"`
-	TotalSize   int64       `json:"total_size,omitempty"`
-	HashHex     string      `json:"hash_hex,omitempty"`
-	NumPieces   int64       `json:"num_pieces,omitempty"`
-	Pieces      []db.Piece  `json:"pieces,omitempty"`
-	PieceHash   string      `json:"piece_hash,omitempty"`
-	Index       int64       `json:"index,omitempty"`
-	Filename    string      `json:"filename,omitempty"`
-	ChunkIndex  int         `json:"chunk_index,omitempty"`
-	TotalChunks int         `json:"total_chunks,omitempty"`
-	Payload     string      `json:"payload,omitempty"`
-	Sequence    int         `json:"sequence,omitempty"`
-
+	Command     string     `json:"command"`
+	CID         string     `json:"cid,omitempty"`
+	PieceSize   int64      `json:"piece_size,omitempty"`
+	TotalSize   int64      `json:"total_size,omitempty"`
+	HashHex     string     `json:"hash_hex,omitempty"`
+	NumPieces   int64      `json:"num_pieces,omitempty"`
+	Pieces      []db.Piece `json:"pieces,omitempty"`
+	PieceHash   string     `json:"piece_hash,omitempty"`
+	Index       int64      `json:"index,omitempty"`
+	Filename    string     `json:"filename,omitempty"`
+	ChunkIndex  int        `json:"chunk_index,omitempty"`
+	TotalChunks int        `json:"total_chunks,omitempty"`
+	Payload     string     `json:"payload,omitempty"`
+	Sequence    int        `json:"sequence,omitempty"`
 }
 
 type DownloadState struct {
@@ -158,7 +156,11 @@ func main() {
 		log.Fatal("Database initialization failed")
 	}
 
-	h, d, err := p2p.NewHost(ctx, "/ip4/0.0.0.0/tcp/0")
+	h, d, err := p2p.NewHost(
+		ctx,
+		"/ip4/0.0.0.0/tcp/0",
+		nil, // temporarily, if you don’t have client yet
+	)
 	if err != nil {
 		log.Fatal("Failed to create libp2p host:", err)
 	}
@@ -375,7 +377,7 @@ func (c *Client) performNetworkDiagnostics() {
 	if hasLocalAddr {
 		fmt.Println("✅ Local network addresses detected - optimized for same-network connections")
 	} else {
-		fmt.Println("ℹ️  No local network addresses detected")
+		fmt.Println("ℹ  No local network addresses detected")
 	}
 
 	// Test ICE connectivity
@@ -693,7 +695,7 @@ func (c *Client) downloadFile(cidStr string) error {
 	}
 
 	fmt.Printf("Found %d providers. Getting file manifest...\n", len(providers))
-	relayAddrStr := "/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWJeENaS7RuZLju4dGEZmK7ZJee4RMfBxo6aPfXBrWsuhw"
+	relayAddrStr := "/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWCP28CB5csS5VAFkFFHi5uDQhVmDa6EisV9vGLAwrJrhK"
 
 	var manifest controlMessage
 	var firstPeer *webRTC.SimpleWebRTCPeer
@@ -724,7 +726,7 @@ func (c *Client) downloadFile(cidStr string) error {
 			// Now perform WebRTC handshake
 			peerConn, err = c.initiateWebRTCConnectionWithRetry(p.ID, 1)
 			if err != nil {
-				log.Printf("⚠️ WebRTC connection via relay failed: %v", err)
+				log.Printf("⚠ WebRTC connection via relay failed: %v", err)
 				continue
 			}
 		}
@@ -743,7 +745,6 @@ func (c *Client) downloadFile(cidStr string) error {
 	if firstPeer == nil {
 		return fmt.Errorf("failed to connect to any provider to get manifest")
 	}
-
 
 	// Store pieces in the database
 	for _, piece := range manifest.Pieces {
@@ -943,7 +944,6 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			continue
 		}
 
-
 		if len(info.Addrs) == 0 {
 			log.Printf("debug 5")
 			lastErr = fmt.Errorf("peer %s has no known multiaddrs", targetPeerID)
@@ -960,11 +960,10 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			err := c.host.Connect(connectCtx, info)
 			connectCancel()
 			if err != nil {
-				log.Printf("failed to connect to peer %s: %w", info.ID, err)
+				log.Printf("failed to connect to peer %s: %v", info.ID, err)
 				fmt.Printf("DHT lookup failed: %v. This could be a network issue now trying connection using relays.\n", err)
 				return nil, err
 			}
-
 
 			fmt.Printf("Successfully connected to peer %s\n", info.ID)
 			// Shorter stabilization time for local network
@@ -993,7 +992,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			webrtcPeer.Close()
 			lastErr = err
 			return nil, err
-			
+
 		}
 
 		webrtcPeer.SetSignalingStream(s)
@@ -1034,6 +1033,13 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 		if err := webrtcPeer.WaitForConnection(90 * time.Second); err != nil {
 			webrtcPeer.Close()
 			lastErr = fmt.Errorf("WebRTC connection failed: %w", err)
+			continue
+		}
+
+		// MODIFIED: Add block to wait for the data channels to be ready
+		if err := webrtcPeer.WaitForDataChannels(10 * time.Second); err != nil {
+			webrtcPeer.Close()
+			lastErr = fmt.Errorf("data channels did not open in time: %w", err)
 			continue
 		}
 
@@ -1120,7 +1126,7 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.SimpleWe
 	case "CHUNK_ACK":
 		c.handleChunkAck(ctrl)
 	default:
-		log.Printf("Unknown control command: %s", ctrl.Command)
+		// log.Printf("Unknown control command: %s", ctrl.Command)
 	}
 }
 
@@ -1344,7 +1350,9 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 	}
 }
 
+// MODIFIED: Added a log message for better debugging
 func (c *Client) onWebRTCPeerClose(peerID peer.ID) {
+	log.Printf("WebRTC peer disconnected: %s", peerID)
 	c.peersMux.Lock()
 	delete(c.webRTCPeers, peerID)
 	c.peersMux.Unlock()
@@ -1375,7 +1383,6 @@ func min64(a, b int64) int64 {
 	return b
 }
 
-
 // New: monitorCongestion
 func (c *Client) monitorCongestion() {
 	ticker := time.NewTicker(PingInterval)
@@ -1391,7 +1398,6 @@ func (c *Client) monitorCongestion() {
 		c.peersMux.RUnlock()
 	}
 }
-
 
 func (c *Client) handlePong(pid peer.ID) {
 	if start, ok := c.pingTimes[pid]; ok {
@@ -1420,4 +1426,3 @@ func (c *Client) handlePong(pid peer.ID) {
 		delete(c.pingTimes, pid)
 	}
 }
-

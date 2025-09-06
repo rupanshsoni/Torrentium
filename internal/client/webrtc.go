@@ -43,21 +43,23 @@ const (
 )
 
 type SimpleWebRTCPeer struct {
-	ID              peer.ID
-	pc              *webrtc.PeerConnection
-	dc              *webrtc.DataChannel
-	reliableDC      *webrtc.DataChannel
-	onMessage       func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer)
-	onCloseCallback func(peerID peer.ID) // New callback for when the connection closes
-	fileWriter      io.WriteCloser
-	writerMutex     sync.RWMutex
-	signalingStream network.Stream
-	streamMux       sync.RWMutex
-	state           ConnectionState
-	stateMux        sync.RWMutex
-	closeOnce       sync.Once
-	closeCh         chan struct{}
-	keepAliveTick   *time.Ticker
+	ID                peer.ID
+	pc                *webrtc.PeerConnection
+	dc                *webrtc.DataChannel
+	reliableDC        *webrtc.DataChannel
+	onMessage         func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer)
+	onCloseCallback   func(peerID peer.ID)
+	fileWriter        io.WriteCloser
+	writerMutex       sync.RWMutex
+	signalingStream   network.Stream
+	streamMux         sync.RWMutex
+	state             ConnectionState
+	stateMux          sync.RWMutex
+	closeOnce         sync.Once
+	closeCh           chan struct{}
+	keepAliveTick     *time.Ticker
+	reliableDCOpen    chan struct{} // ADDED: To signal when the reliable channel is open
+	dcOpenWg          sync.WaitGroup    // ADDED: To wait for all data channels
 }
 
 func NewSimpleWebRTCPeer(onMessage func(msg webrtc.DataChannelMessage, peer *SimpleWebRTCPeer), onClose func(peerID peer.ID)) (*SimpleWebRTCPeer, error) {
@@ -67,12 +69,16 @@ func NewSimpleWebRTCPeer(onMessage func(msg webrtc.DataChannelMessage, peer *Sim
 	}
 
 	peer := &SimpleWebRTCPeer{
-		pc:              pc,
-		onMessage:       onMessage,
-		onCloseCallback: onClose,
-		closeCh:         make(chan struct{}),
-		state:           ConnectionStateNew,
+		pc:               pc,
+		onMessage:        onMessage,
+		onCloseCallback:  onClose,
+		closeCh:          make(chan struct{}),
+		state:            ConnectionStateNew,
+		reliableDCOpen:   make(chan struct{}), // MODIFIED: Initialize the new channel
 	}
+
+	// MODIFIED: We expect two data channels: "data" and "reliable"
+	peer.dcOpenWg.Add(2)
 
 	peer.setupConnectionHandlers()
 	return peer, nil
@@ -118,6 +124,14 @@ func (p *SimpleWebRTCPeer) setupDataChannel(dc *webrtc.DataChannel) {
 	dc.OnOpen(func() {
 		log.Printf("Data channel '%s' opened", dc.Label())
 		p.setConnectionState(ConnectionStateConnected)
+
+		// MODIFIED: Signal that this data channel is open
+		p.dcOpenWg.Done()
+
+		if dc.Label() == "reliable" {
+			// MODIFIED: Specifically signal that the reliable channel is open
+			close(p.reliableDCOpen)
+		}
 	})
 
 	dc.OnClose(func() {
@@ -219,9 +233,6 @@ func (p *SimpleWebRTCPeer) HandleAnswer(answerStr string) error {
 	return p.pc.SetRemoteDescription(answer)
 }
 
-// Checks if the WebRTC data channel is open
-// Converts any Go data (struct/map/slice/etc.) into JSON
-// Sends that JSON string to the other peer using WebRTC's data channel
 func (p *SimpleWebRTCPeer) SendJSON(v interface{}) error {
 	if p.dc == nil || p.dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel is not open")
@@ -233,7 +244,17 @@ func (p *SimpleWebRTCPeer) SendJSON(v interface{}) error {
 	return p.dc.SendText(string(data))
 }
 
+// MODIFIED: SendJSONReliable now waits for the channel to be ready
 func (p *SimpleWebRTCPeer) SendJSONReliable(v interface{}) error {
+	select {
+	case <-p.reliableDCOpen:
+		// Channel is open, proceed
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out waiting for reliable data channel to open")
+	case <-p.closeCh:
+		return fmt.Errorf("connection closed while waiting for data channel")
+	}
+
 	if p.reliableDC == nil || p.reliableDC.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("reliable data channel is not open")
 	}
@@ -312,6 +333,24 @@ func (p *SimpleWebRTCPeer) WaitForConnection(timeout time.Duration) error {
 	}
 }
 
+// ADDED: New function to wait for all data channels
+func (p *SimpleWebRTCPeer) WaitForDataChannels(timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		p.dcOpenWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil // All channels opened
+	case <-time.After(timeout):
+		return fmt.Errorf("timed out waiting for data channels to open")
+	case <-p.closeCh:
+		return fmt.Errorf("connection closed while waiting for data channels")
+	}
+}
+
 func (p *SimpleWebRTCPeer) setConnectionState(state ConnectionState) {
 	p.stateMux.Lock()
 	defer p.stateMux.Unlock()
@@ -371,7 +410,6 @@ func (p *SimpleWebRTCPeer) SignalDownloadComplete() {
 	p.Close()
 }
 
-// TestICEConnectivity performs a basic ICE connectivity test
 func TestICEConnectivity() error {
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {

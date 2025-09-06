@@ -12,6 +12,7 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	relayv2client "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
@@ -38,22 +39,26 @@ func reserveWithRelay(ctx context.Context, relayAddrStr string, h host.Host) err
 	log.Printf("✅ Reservation with relay successful. Expires at: %v", res.Expiration)
 	return nil
 }
+func NewHost(
+	ctx context.Context,
+	listenAddr string,
+	onOffer func(offer, remotePeerID string, s network.Stream) (string, error),
+) (host.Host, *dht.IpfsDHT, error) {
 
-func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, error) {
+	// 🔑 Identity key
 	priv, err := loadOrGeneratePrivateKey()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load/generate private key: %w", err)
 	}
 
+	// 📡 Local listen address
 	maddr, err := ma.NewMultiaddr(listenAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse listen address '%s': %w", listenAddr, err)
 	}
 
-	var idht *dht.IpfsDHT
-	relayAddrStr := "/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWJeENaS7RuZLju4dGEZmK7ZJee4RMfBxo6aPfXBrWsuhw"
-
-	// Prepare static relay info
+	// 🌐 Relay config (static relay on Render)
+	relayAddrStr := "/dns4/relay-torrentium-9ztp.onrender.com/tcp/443/wss/p2p/12D3KooWCP28CB5csS5VAFkFFHi5uDQhVmDa6EisV9vGLAwrJrhK"
 	relayMaddr, err := ma.NewMultiaddr(relayAddrStr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid relay multiaddr: %w", err)
@@ -63,38 +68,41 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 		return nil, nil, fmt.Errorf("invalid relay peer info: %w", err)
 	}
 
-	// Initialize libp2p host
+	// 🚀 Create host with relay + autorelay
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		libp2p.EnableRelay(),
+		libp2p.EnableRelay(), // act as relay client
 		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*relayInfo}),
 		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
-		log.Fatalf("libp2p peer not initialized: %v", err)
+		return nil, nil, fmt.Errorf("libp2p peer not initialized: %w", err)
 	}
 
-	// Optional: connect to relay (will be done by reservation anyway)
+	// 🔌 Connect to relay
 	if err := h.Connect(ctx, *relayInfo); err != nil {
-		log.Fatalf("❌ Failed to connect to relay: %v", err)
+		return nil, nil, fmt.Errorf("❌ Failed to connect to relay: %w", err)
 	}
 	log.Println("✅ Connected to relay")
 
-	// 🔐 Reserve relay slot (critical!)
+	// 🛂 Reserve relay slot
 	if err := reserveWithRelay(ctx, relayAddrStr, h); err != nil {
-		log.Fatalf("❌ Relay reservation failed: %v", err)
+		return nil, nil, fmt.Errorf("❌ Relay reservation failed: %w", err)
 	}
+	log.Println("✅ Relay reservation successful")
 
-	// Init DHT
-	idht, err = dht.New(ctx, h)
+	// 📒 DHT setup
+	idht, err := dht.New(ctx, h)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to initialize DHT: %w", err)
 	}
-
 	if err := idht.Bootstrap(ctx); err != nil {
 		return nil, nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
+
+	// 📨 Register WebRTC signaling protocol (your handler)
+	RegisterSignalingProtocol(h, onOffer)
 
 	log.Printf("✅ Host created with ID: %s", h.ID())
 	for _, addr := range h.Addrs() {
